@@ -52,22 +52,41 @@ function dev-sandbox {
 Then reload with `. $PROFILE`. If PowerShell blocks the script, allow local scripts
 once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
-### 3. Set your API key (recommended)
+### 3. Authenticate once, for every project
+
+Do this and you never log in inside a sandbox again. Pick whichever fits your plan.
+
+**On a Claude subscription — `-SetupToken`:**
+
+```powershell
+dev-sandbox -SetupToken
+```
+
+This runs Claude Code's long-lived token flow (approve in the browser, paste the
+printed `sk-ant-oat…` token back), then saves it to your Windows user environment as
+`CLAUDE_CODE_OAUTH_TOKEN`. Open a new PowerShell window afterwards.
+
+**On API billing — set the key yourself:**
 
 ```powershell
 [Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")
 ```
 
-Open a new PowerShell window afterwards. The wrapper forwards this into the
-container as an environment variable at creation time. It is **never written to
-disk** — not into the project, not into a volume — so there is nothing to
-accidentally commit, and Claude Code works immediately in every project with no
-per-repo login.
+Either way the wrapper forwards the value into the container as an environment
+variable at creation time. It is **never written to disk** — not into the project,
+not into a volume — so there is nothing to accidentally commit, and Claude Code
+works immediately in every project with no per-repo login. `CLAUDE_CODE_OAUTH_TOKEN`
+wins if both are set. The banner's `home` line tells you which one is in play.
 
-If you skip this, Claude Code falls back to its browser login flow: run `claude`,
-paste the printed URL into your Windows browser, approve, paste the code back. That
-token persists in the project's home volume, so you log in once *per project*
-(see [Cross-project isolation](#cross-project-isolation) for why it is per project).
+Containers already running were created with the old environment, so refresh them
+with `dev-sandbox -Stop` on your next visit to that project.
+
+If you set neither, Claude Code falls back to its interactive login: run `claude`,
+paste the printed URL into your Windows browser, approve, paste the code back. Those
+credentials land in the project's home volume, **so you log in again for every new
+project** — that is the per-project home volume working as designed
+(see [Cross-project isolation](#cross-project-isolation)), not a bug, and the two
+options above are the way out of it.
 
 ---
 
@@ -83,6 +102,7 @@ token persists in the project's home volume, so you log in once *per project*
 | `dev-sandbox -Path ..\other-repo` | Mount somewhere other than the current folder |
 | `dev-sandbox -Command "npm ci"` | Run one command instead of a shell |
 | `dev-sandbox -Isolated` | Throwaway home volume, for untrusted third-party code |
+| `dev-sandbox -SetupToken` | Log in once on Windows so no sandbox ever asks again |
 | `dev-sandbox -Stop` | Shut the container down |
 
 Default published ports are **3000, 5173, 8080** (Next/CRA, Vite, and a generic
@@ -175,8 +195,15 @@ a single shared home volume, a Claude session in repo B could read repo A's
 transcripts — they would sit in its own home directory. Per-project volumes remove
 that channel entirely.
 
+This is also why a login done *inside* a sandbox only sticks for that project: the
+credentials Claude Code writes live in that project's home volume. Forward auth from
+the host instead (`dev-sandbox -SetupToken`, or `ANTHROPIC_API_KEY`) and the question
+goes away without weakening the isolation — nothing is shared between projects except
+an environment variable you already own.
+
 `-SharedHome` opts back into one shared volume if you want shared settings across
-projects and are comfortable with that trade.
+projects and are comfortable with that trade. It shares transcripts too, so it is the
+wrong tool for merely sharing a login.
 
 `-Isolated` goes the other way: a throwaway home volume that `-Stop` deletes.
 
@@ -225,8 +252,11 @@ Specifically:
 - **Network access is unrestricted by default.** It has to be — the Claude API and
   the npm registry both need it. Anything running in the container can reach the
   internet and can reach services listening on your Windows host.
-- **Your API key is in the container's environment**, readable by any process in it.
-  That is the cost of not re-authenticating per project.
+- **Your API key or OAuth token is in the container's environment**, readable by any
+  process in it. That is the cost of not re-authenticating per project — and it
+  applies to `-Isolated` containers too, so drop the variable from that shell
+  (`$env:CLAUDE_CODE_OAUTH_TOKEN = $null`) before sandboxing code you actually
+  distrust.
 - The `node` user is unprivileged and cannot `sudo`, but that is a speed bump, not a
   boundary.
 

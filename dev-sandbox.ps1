@@ -38,6 +38,10 @@
 .PARAMETER Command
     Run this command instead of an interactive shell.
 
+.PARAMETER SetupToken
+    Run the Claude Code long-lived token flow once, then save the token to your
+    Windows user environment so every future sandbox starts already logged in.
+
 .PARAMETER Stop
     Stop and remove this project's container (and its throwaway volume, if -Isolated).
 
@@ -57,6 +61,10 @@
 .EXAMPLE
     dev-sandbox -Port 5173 -Claude
     Publish Vite's port and drop straight into Claude Code.
+
+.EXAMPLE
+    dev-sandbox -SetupToken
+    Log in once, here, and never again in any project sandbox.
 #>
 [CmdletBinding()]
 param(
@@ -67,6 +75,7 @@ param(
     [switch]   $SharedModules,
     [switch]   $Claude,
     [string]   $Command,
+    [switch]   $SetupToken,
     [switch]   $Stop,
     [switch]   $Fresh,
     [switch]   $Rebuild,
@@ -250,6 +259,45 @@ if ($needBuild) {
 }
 
 # --------------------------------------------------------------------------
+# -SetupToken
+# --------------------------------------------------------------------------
+
+if ($SetupToken) {
+    Write-Host "dev-sandbox: starting the Claude Code long-lived token flow." -ForegroundColor Cyan
+    Write-Host "  Approve in the browser, then paste the token it prints back here." -ForegroundColor DarkGray
+    Write-Host ""
+
+    # Prefer the host install: it is already the account you use on Windows, and
+    # it keeps the flow out of a container entirely. Otherwise run it in a
+    # throwaway container with its own config dir, so nothing is left behind.
+    $hostClaude = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue
+    if ($hostClaude) {
+        & $hostClaude.Source setup-token
+    } else {
+        if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+            Fail "-SetupToken needs an interactive console when claude is not installed on Windows."
+        }
+        docker run --rm -i -t -e "CLAUDE_CONFIG_DIR=/tmp/claude-setup" $image claude setup-token
+    }
+
+    Write-Host ""
+    $token = (Read-Host "Paste the token").Trim()
+    if (-not $token.StartsWith("sk-ant-oat")) {
+        Fail "that does not look like a setup token (expected it to start with sk-ant-oat). Nothing was saved."
+    }
+
+    [Environment]::SetEnvironmentVariable("CLAUDE_CODE_OAUTH_TOKEN", $token, "User")
+    $env:CLAUDE_CODE_OAUTH_TOKEN = $token
+
+    Write-Host ""
+    Write-Host "dev-sandbox: saved CLAUDE_CODE_OAUTH_TOKEN to your Windows user environment." -ForegroundColor Green
+    Write-Host "  every sandbox from now on starts already logged in, in every project." -ForegroundColor DarkGray
+    Write-Host "  already-open PowerShell windows need to be reopened to see it." -ForegroundColor DarkGray
+    Write-Host "  containers created before now keep their old environment: 'dev-sandbox -Stop' to refresh one." -ForegroundColor DarkGray
+    exit 0
+}
+
+# --------------------------------------------------------------------------
 # Create the container if it is not already running
 # --------------------------------------------------------------------------
 
@@ -289,6 +337,13 @@ if (-not (Test-ContainerRunning $containerName)) {
 
     # Auth is forwarded from the host environment and never written to disk, so
     # it works identically in every project and nothing secret can be committed.
+    # Without this the credentials Claude Code writes on login land in the
+    # per-project home volume, which is why a plain login has to be repeated for
+    # every new project. Either variable removes that entirely; -SetupToken
+    # produces the OAuth one from a Claude subscription.
+    if ($env:CLAUDE_CODE_OAUTH_TOKEN) {
+        $runArgs += @("-e", "CLAUDE_CODE_OAUTH_TOKEN=$($env:CLAUDE_CODE_OAUTH_TOKEN)")
+    }
     if ($env:ANTHROPIC_API_KEY) {
         $runArgs += @("-e", "ANTHROPIC_API_KEY=$($env:ANTHROPIC_API_KEY)")
     }
@@ -344,7 +399,13 @@ if ($created) {
         $portList = "$portList  (-Port $($missing -join ',') needs 'dev-sandbox -Stop' first)"
     }
 }
-if ($env:ANTHROPIC_API_KEY) { $auth = "api key forwarded" } else { $auth = "no api key, claude will prompt to log in" }
+if ($env:CLAUDE_CODE_OAUTH_TOKEN) {
+    $auth = "oauth token forwarded"
+} elseif ($env:ANTHROPIC_API_KEY) {
+    $auth = "api key forwarded"
+} else {
+    $auth = "no host auth, claude will prompt to log in (run 'dev-sandbox -SetupToken' once to stop that)"
+}
 
 Write-Host ""
 Write-Host "dev-sandbox: $verb $containerName" -ForegroundColor Green
