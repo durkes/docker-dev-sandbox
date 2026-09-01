@@ -234,10 +234,12 @@ function Test-ContainerExists($Name) {
 
 function Get-TokenFromPaste {
     # `claude setup-token` prints the token inside a block of prose, and a narrow
-    # terminal wraps the token itself across lines. So take the whole paste and
-    # reassemble: find the fragment that starts the token, then keep appending
-    # lines that are made purely of token characters. Prose lines always contain
-    # a space or punctuation, so they cannot be mistaken for a fragment.
+    # terminal wraps the token itself across lines. Only whitespace gets into the
+    # paste that way, and whitespace is never part of a token -- so reassembly is
+    # just: find the fragment that starts the token, drop the spaces and the line
+    # breaks, and keep appending while the lines are still nothing but token
+    # characters. A prose line has a space or a full stop in it once the wrapping
+    # is undone, which is what ends the token.
     $token  = ""
     $blanks = 0
 
@@ -253,7 +255,9 @@ function Get-TokenFromPaste {
             continue
         }
         $blanks = 0
-        $line = $line.Trim()
+        # Wrapping and indenting are the only things that get added to a pasted
+        # token, and neither is token content.
+        $line = $line -replace '\s', ''
 
         if ($line -match 'sk-ant-oat[A-Za-z0-9_\-]*') {
             # Start here, dropping any prefix ("export CLAUDE_CODE_OAUTH_TOKEN=")

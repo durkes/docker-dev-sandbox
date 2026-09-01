@@ -1,7 +1,7 @@
 # docker-dev-sandbox
 
-A reusable Docker sandbox for Node projects on Windows, so you can let an AI agent
-run wild inside a project without giving it your whole machine.
+A reusable Docker sandbox for Node projects on Windows, so you can let AI agents
+run wild inside a project without giving it access to your whole machine.
 
 The image holds **no project code**. Your project is bind-mounted in at run time, so
 one image serves every repo you own. From any project folder:
@@ -65,8 +65,9 @@ dev-sandbox -ClaudeAuth
 This runs Claude Code's long-lived token flow: approve in the browser, then paste
 back what it prints. You can paste the whole block — surrounding prose, the wrapped
 token, blank lines and all — and press Enter on an empty line; the wrapper finds the
-`sk-ant-oat…` token in it and reassembles it. It is then saved to your Windows user
-environment as `CLAUDE_CODE_OAUTH_TOKEN`. Open a new PowerShell window afterwards.
+`sk-ant-oat…` token in it and reassembles it, ignoring the spaces and line breaks the
+terminal added. It is then saved to your Windows user environment as
+`CLAUDE_CODE_OAUTH_TOKEN`. Open a new PowerShell window afterwards.
 
 **On API billing — set the key yourself:**
 
