@@ -3,10 +3,12 @@
     Open a shell in a containerized dev environment for the current project.
 
 .DESCRIPTION
-    Starts (or reuses) a long-lived Docker container with the project directory
-    bind-mounted at /workspace, then execs an interactive shell into it. Run the
-    command again from another PowerShell window to get another prompt in the
-    same container.
+    Starts (or reuses) a Docker container with the project directory bind-mounted
+    at /workspace, then execs an interactive shell into it. Run the command again
+    from another PowerShell window to get another prompt in the same container.
+    By default the container stops as soon as no shell is left attached to it
+    (see -Persist); with two windows open side by side, closing one leaves it
+    running for the other.
 
     The bind mount is the entire containment boundary: only the project directory
     and its subdirectories are visible. Nothing above it, no Docker socket, no
@@ -42,6 +44,11 @@
     Run the Claude Code long-lived token flow once, then save the token to your
     Windows user environment so every future sandbox starts already logged in.
 
+.PARAMETER Persist
+    Leave the container running after this shell exits, instead of stopping it
+    as soon as no other shell is attached. Use this to keep it warm across
+    windows opened one after another rather than side by side.
+
 .PARAMETER Stop
     Stop and remove this project's container (and its throwaway volume, if -Isolated).
 
@@ -76,6 +83,7 @@ param(
     [switch]   $Claude,
     [string]   $Command,
     [switch]   $ClaudeAuth,
+    [switch]   $Persist,
     [switch]   $Stop,
     [switch]   $Fresh,
     [switch]   $Rebuild,
@@ -187,6 +195,33 @@ function Test-VolumeExists($Name) {
     return (-not [string]::IsNullOrWhiteSpace(($found -join "")))
 }
 
+function Test-ContainerHasOtherShell($Name) {
+    # Anything still running inside the container besides the "tail -f /dev/null"
+    # sentinel and its init wrapper means another window's shell (or something it
+    # started) is still attached. ps itself shows up in its own snapshot, so that
+    # line is filtered too.
+    $lines = docker exec $Name ps -eo args= 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    foreach ($line in $lines) {
+        $line = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line -match 'docker-init\b') { continue }
+        if ($line -eq "tail -f /dev/null") { continue }
+        if ($line -match '^ps -eo args=$') { continue }
+        return $true
+    }
+    return $false
+}
+
+function Remove-SandboxContainer($Name, $HomeVolume, $IsIsolated) {
+    if (Test-ContainerExists $Name) {
+        docker rm -f $Name | Out-Null
+    }
+    if ($IsIsolated -and (Test-VolumeExists $HomeVolume)) {
+        docker volume rm $HomeVolume | Out-Null
+    }
+}
+
 # --------------------------------------------------------------------------
 # Resolve the project path
 # --------------------------------------------------------------------------
@@ -235,15 +270,12 @@ if ($Isolated) {
 # --------------------------------------------------------------------------
 
 if ($Stop) {
-    if (Test-ContainerExists $containerName) {
-        docker rm -f $containerName | Out-Null
+    $existed = Test-ContainerExists $containerName
+    Remove-SandboxContainer $containerName $homeVolume $Isolated
+    if ($existed) {
         Write-Host "dev-sandbox: stopped $containerName" -ForegroundColor Yellow
     } else {
         Write-Host "dev-sandbox: no container running for this project" -ForegroundColor Yellow
-    }
-    if ($Isolated -and (Test-VolumeExists $homeVolume)) {
-        docker volume rm $homeVolume | Out-Null
-        Write-Host "dev-sandbox: removed isolated volume $homeVolume" -ForegroundColor Yellow
     }
     exit 0
 }
@@ -461,7 +493,11 @@ Write-Host "  image  $image" -ForegroundColor DarkGray
 Write-Host "  mount  $projectPath -> /workspace" -ForegroundColor DarkGray
 Write-Host "  ports  $portList" -ForegroundColor DarkGray
 Write-Host "  home   $homeVolume ($homeLabel), $auth" -ForegroundColor DarkGray
-Write-Host "  exiting leaves the container running; 'dev-sandbox -Stop' shuts it down." -ForegroundColor DarkGray
+if ($Persist) {
+    Write-Host "  -Persist: exiting leaves the container running; 'dev-sandbox -Stop' shuts it down." -ForegroundColor DarkGray
+} else {
+    Write-Host "  stops automatically once no other shell is attached (-Persist to keep it running)." -ForegroundColor DarkGray
+}
 Write-Host ""
 
 # Allocate a TTY only when there actually is one. Passing -t with redirected
@@ -483,4 +519,13 @@ if ($Command) {
 }
 
 docker @execArgs
-exit $LASTEXITCODE
+$exitCode = $LASTEXITCODE
+
+if (-not $Persist) {
+    if (-not (Test-ContainerHasOtherShell $containerName)) {
+        Remove-SandboxContainer $containerName $homeVolume $Isolated
+        Write-Host "dev-sandbox: last shell exited, stopped $containerName" -ForegroundColor Yellow
+    }
+}
+
+exit $exitCode

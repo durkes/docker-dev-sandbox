@@ -105,6 +105,7 @@ options above are the way out of it.
 | `dev-sandbox -Command "npm ci"` | Run one command instead of a shell |
 | `dev-sandbox -Isolated` | Throwaway home volume, for untrusted third-party code |
 | `dev-sandbox -ClaudeAuth` | Log in once on Windows so no sandbox ever asks again |
+| `dev-sandbox -Persist` | Keep the container running after this shell exits |
 | `dev-sandbox -Stop` | Shut the container down |
 
 Default published ports are **3000, 5173, 8080** (Next/CRA, Vite, and a generic
@@ -112,8 +113,8 @@ spare). Publishing an unused port costs nothing, so you rarely need `-Port` at a
 
 ### Multiple prompts in the same sandbox
 
-The container is **long-lived and detached**, and each `dev-sandbox` invocation
-`exec`s a new shell into it. So: open a second PowerShell window, `cd` to the same
+Each `dev-sandbox` invocation `exec`s a new shell into the project's container,
+creating it first if needed. So: open a second PowerShell window, `cd` to the same
 project, type `dev-sandbox`, and you get a second independent prompt in the *same*
 container — sharing the same filesystem, the same processes, and the same localhost.
 
@@ -122,8 +123,10 @@ A typical layout is three windows: `npm run dev` in one, `claude` in another,
 
 Two consequences:
 
-- **Exiting a shell does not stop the container.** Your dev server keeps running
-  after you close the window. `dev-sandbox -Stop` actually shuts it down.
+- **The container stops itself once the last shell exits.** With three windows open,
+  closing one leaves the container running for the other two; closing the last one
+  stops it (and your dev server with it). Pass `-Persist` to keep it running solo,
+  e.g. for a long build you want to walk away from.
 - **Published ports are fixed when the container is created.** If you ask for a port
   that is not published, the banner tells you so; run `dev-sandbox -Stop` and start
   again with the port you want.
