@@ -567,6 +567,23 @@ if (-not (Test-ContainerRunning $containerName)) {
         docker exec -u root $containerName chown node:node $mount.ContainerPath | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail "failed to set ownership on $($mount.ContainerPath)" }
     }
+
+    # CLAUDE_CODE_OAUTH_TOKEN is enough to authenticate the interactive REPL --
+    # what actually stops -Claude from landing in a prompt on a brand new home
+    # volume is Claude Code's three first-run questions (theme, "do you trust
+    # this folder?", and the bypass-permissions warning). All three are answered
+    # by ~/.claude.json, so seed it. No credentials go in this file; auth still
+    # comes from the forwarded environment only.
+    #
+    # Seeded only when absent, since this same file also holds real settings and
+    # history for a reused home volume.
+    # Base64 because PowerShell 5.1 strips embedded double quotes when it hands
+    # an argument to a native command, which would deliver unquoted, unparseable
+    # JSON. The command below is deliberately free of them for the same reason.
+    $seedJson = '{"hasCompletedOnboarding":true,"theme":"dark","bypassPermissionsModeAccepted":true,' +
+                '"projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}'
+    $seedB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($seedJson))
+    docker exec $containerName bash -c "if [ ! -e `$HOME/.claude.json ]; then echo $seedB64 | base64 -d > `$HOME/.claude.json; fi" | Out-Null
 }
 
 # --------------------------------------------------------------------------
