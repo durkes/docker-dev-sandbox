@@ -206,9 +206,13 @@ function Resolve-PortMapping($Spec, $DockerPorts) {
 }
 
 function Test-DockerReady {
-    # No 2>&1 anywhere in this script: in PowerShell 5.1 that wraps a native
-    # command's stderr in ErrorRecords, which $ErrorActionPreference = "Stop"
-    # then turns into a terminating error even on success.
+    # No stderr redirection on native commands anywhere in this script -- neither
+    # 2>&1 nor 2>$null. In PowerShell 5.1 either one wraps the command's stderr
+    # in ErrorRecords, which $ErrorActionPreference = "Stop" turns into a
+    # terminating error the moment anything is written there, whatever the exit
+    # code. Left unredirected, stderr is harmless. So the pattern throughout is
+    # to check first (docker ps --filter, which is quiet) and only then run the
+    # command that would complain.
     docker info --format '{{.ServerVersion}}' | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Fail "cannot reach the Docker daemon. Is Docker Desktop running?"
@@ -281,7 +285,13 @@ function Test-ContainerHasOtherShell($Name) {
     # sentinel and its init wrapper means another window's shell (or something it
     # started) is still attached. ps itself shows up in its own snapshot, so that
     # line is filtered too.
-    $lines = docker exec $Name ps -eo args= 2>$null
+    #
+    # The existence check is what keeps docker exec off its stderr path: another
+    # window can have removed the container between this shell exiting and this
+    # call, and "Error: No such container" would then be fatal (again: 2>$null
+    # does not help, see Test-DockerReady).
+    if (-not (Test-ContainerRunning $Name)) { return $false }
+    $lines = docker exec $Name ps -eo args=
     if ($LASTEXITCODE -ne 0) { return $false }
     foreach ($line in $lines) {
         $line = $line.Trim()
@@ -294,13 +304,39 @@ function Test-ContainerHasOtherShell($Name) {
     return $false
 }
 
-function Remove-SandboxContainer($Name, $HomeVolume, $IsIsolated) {
+function Get-ContainerIsolatedHome($Name) {
+    # An -Isolated container carries the name of its throwaway home volume as a
+    # label. Reading it back off the container is the only way to be right about
+    # what to discard: $Isolated describes *this* invocation, not the one that
+    # created the container, so a plain "dev-sandbox -Stop" (or another window
+    # being the last one to exit) would otherwise leave the volume behind, and
+    # the next -Isolated run would silently mount it again.
+    # No 2>$null here, and no call to this unless the container exists: docker
+    # inspect writes to stderr for a missing one, which would be fatal.
+    $labelJson = docker inspect $Name --format '{{json .Config.Labels}}'
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $labelJson = ($labelJson -join "")
+    if ([string]::IsNullOrWhiteSpace($labelJson)) { return $null }
+    $labels = $labelJson | ConvertFrom-Json
+    if (-not $labels) { return $null }
+    if ($labels.PSObject.Properties.Name -notcontains "dev-sandbox.isolated-home") { return $null }
+    return $labels."dev-sandbox.isolated-home"
+}
+
+function Remove-IsolatedHomeVolume($Name) {
+    if ($Name -and (Test-VolumeExists $Name)) {
+        docker volume rm $Name | Out-Null
+    }
+}
+
+function Remove-SandboxContainer($Name) {
+    $isolatedHome = $null
     if (Test-ContainerExists $Name) {
+        # Read the label before the container is removed along with it.
+        $isolatedHome = Get-ContainerIsolatedHome $Name
         docker rm -f $Name | Out-Null
     }
-    if ($IsIsolated -and (Test-VolumeExists $HomeVolume)) {
-        docker volume rm $HomeVolume | Out-Null
-    }
+    Remove-IsolatedHomeVolume $isolatedHome
 }
 
 # --------------------------------------------------------------------------
@@ -321,13 +357,26 @@ $projectPath = $resolved.TrimEnd('\')
 
 # The mount is the whole containment boundary, so a too-broad mount silently
 # defeats the point. Refuse the obvious mistakes.
-$forbidden = @($env:USERPROFILE, ($env:SystemDrive + "\"), "C:\Users") |
-    Where-Object { $_ }
+$usersRoot = if ($env:SystemDrive) { "$env:SystemDrive\Users" } else { "C:\Users" }
+$forbidden = @($env:USERPROFILE, $env:PUBLIC, $usersRoot) | Where-Object { $_ }
+
+# The root of *any* drive, not just the system one. $projectPath has already had
+# its trailing slash stripped, so "D:\" is "D:" by now -- which is exactly what
+# Split-Path -Qualifier returns. (It throws on a UNC path, which has no drive.)
+try { $qualifier = Split-Path $projectPath -Qualifier } catch { $qualifier = $null }
+if ($qualifier) { $forbidden += $qualifier }
 
 foreach ($bad in $forbidden) {
     if ($projectPath.TrimEnd('\') -ieq $bad.TrimEnd('\')) {
-        Fail "refusing to mount '$projectPath' -- mount a single project directory, not a drive root or your user profile."
+        Fail "refusing to mount '$projectPath' -- mount a single project directory, not a drive root or a user profile."
     }
+}
+
+# Anything sitting directly under C:\Users is somebody's whole profile, whichever
+# account it happens to belong to.
+$projectParent = Split-Path $projectPath -Parent
+if ($projectParent -and ($projectParent.TrimEnd('\') -ieq $usersRoot.TrimEnd('\'))) {
+    Fail "refusing to mount '$projectPath' -- that is a whole user profile, not a project directory."
 }
 
 $slug          = Get-Slug $projectPath
@@ -362,8 +411,12 @@ if (-not $SharedModules) {
     }
 }
 
+# Named unconditionally so -Stop can discard a leftover one without the caller
+# having to repeat -Isolated.
+$isolatedHomeVolume = "dev-sandbox-home-isolated-$slug"
+
 if ($Isolated) {
-    $homeVolume = "dev-sandbox-home-isolated-$slug"
+    $homeVolume = $isolatedHomeVolume
     $homeLabel  = "isolated, discarded on -Stop"
 } elseif ($SharedHome) {
     $homeVolume = "dev-sandbox-home-shared"
@@ -379,7 +432,10 @@ if ($Isolated) {
 
 if ($Stop) {
     $existed = Test-ContainerExists $containerName
-    Remove-SandboxContainer $containerName $homeVolume $Isolated
+    Remove-SandboxContainer $containerName
+    # Also sweep a leftover from a crashed or rebooted session. This name only
+    # ever belongs to an -Isolated home, so removing it on any -Stop is safe.
+    Remove-IsolatedHomeVolume $isolatedHomeVolume
     if ($existed) {
         Write-Host "dev-sandbox: stopped $containerName" -ForegroundColor Yellow
     } else {
@@ -500,6 +556,10 @@ if (-not (Test-ContainerRunning $containerName)) {
         docker rm -f $containerName | Out-Null
     }
 
+    # "Throwaway" has to mean it: a volume surviving a crash or a reboot would
+    # otherwise be mounted straight back into the new sandbox.
+    if ($Isolated) { Remove-IsolatedHomeVolume $isolatedHomeVolume }
+
     $runArgs = @(
         "run", "-d",
         "--name", $containerName,
@@ -512,6 +572,12 @@ if (-not (Test-ContainerRunning $containerName)) {
         "-v", "$($projectPath):/workspace",
         "-v", "$($homeVolume):/home/node"
     )
+
+    # Recorded on the container so -Stop, and the auto-stop when the last shell
+    # exits, can find this volume again without -Isolated being repeated.
+    if ($Isolated) {
+        $runArgs += @("--label", "dev-sandbox.isolated-home=$homeVolume")
+    }
 
     # Shadow the host's node_modules: a Windows npm install produces Windows
     # binaries and .cmd shims that break under Linux, and vice versa. Covers
@@ -610,9 +676,17 @@ if ($created) {
     } else {
         $portList = "none"
     }
-    $requested = ($Port | ForEach-Object { ConvertTo-PortMapping $_ })
-    $missing = $requested | Where-Object { $published -notcontains $_ }
-    if ($missing) {
+    # Compare on the container port alone. A host port that was walked upward at
+    # creation (3000 busy -> 3001:3000) still serves what was asked for, so
+    # matching whole "host:container" strings would wrongly report it missing and
+    # send you to -Stop for a port you already have.
+    $publishedContainerPorts = @($published | ForEach-Object { ($_ -split ':')[1] })
+    $missing = @()
+    foreach ($p in $Port) {
+        $containerPort = ((ConvertTo-PortMapping $p) -split ':')[1]
+        if ($publishedContainerPorts -notcontains $containerPort) { $missing += $p }
+    }
+    if ($missing.Count -gt 0) {
         $portList = "$portList  (-Port $($missing -join ',') needs 'dev-sandbox -Stop' first)"
     }
 }
@@ -660,7 +734,7 @@ $exitCode = $LASTEXITCODE
 
 if (-not $Persist) {
     if (-not (Test-ContainerHasOtherShell $containerName)) {
-        Remove-SandboxContainer $containerName $homeVolume $Isolated
+        Remove-SandboxContainer $containerName
         Write-Host "dev-sandbox: last shell exited, stopped $containerName" -ForegroundColor Yellow
     }
 }

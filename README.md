@@ -163,8 +163,8 @@ normal Windows browser.
 
 Exactly one project directory is bind-mounted, at `/workspace`. Nothing above it
 exists inside the container — `/workspace/..` is the container's own root
-filesystem, not your Documents folder. The wrapper refuses to mount a drive root,
-`C:\Users`, or your user profile.
+filesystem, not your Documents folder. The wrapper refuses to mount the root of any drive,
+`C:\Users`, or any user profile under it.
 
 Also absent, deliberately: no Docker socket mount (which would be a trivial root
 escape), no `--privileged`, no added capabilities, and `--security-opt
