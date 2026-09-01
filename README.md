@@ -187,9 +187,10 @@ the volume is owned by root instead of the `node` user. The wrapper fixes owners
 when it creates a container, so `dev-sandbox -Stop` followed by `dev-sandbox`
 resolves it without losing the volume.
 
-**Monorepos:** one volume at the root does not cover nested `packages/*/node_modules`.
-Those will fall through to the bind mount and collide with the Windows install.
-Ask for a `-ModulePath` switch if you need it.
+**Monorepos:** every `package.json` under the project (e.g. `v1/package.json`,
+`packages/*/package.json`) gets its own volume shadowing its `node_modules`, found
+by scanning the project when the container is created. Adding a new nested
+workspace later needs `dev-sandbox -Fresh` to pick it up.
 
 ### Cross-project isolation
 

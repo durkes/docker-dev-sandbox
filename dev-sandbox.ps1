@@ -32,7 +32,8 @@
     transcripts from your other projects.
 
 .PARAMETER SharedModules
-    Do not shadow /workspace/node_modules with a container-only volume. Only use
+    Do not shadow /workspace/node_modules (and any node_modules of a nested
+    package.json, e.g. v1/node_modules) with a container-only volume. Only use
     this if you never run npm from Windows for this project.
 
 .PARAMETER Claude
@@ -117,6 +118,34 @@ function Get-Slug($AbsolutePath) {
     $sha.Dispose()
 
     return "$leaf-$($hash.Substring(0, 6))"
+}
+
+function Find-NestedWorkspaceDirs($Root, $MaxDepth) {
+    # Breadth-first, and critically: never descends into node_modules (or
+    # .git) at all, rather than filtering it out of the results afterward --
+    # walking into a real node_modules can mean thousands of package.json
+    # files. Depth is capped so a pathologically deep tree can't make this
+    # scan slow either.
+    $results = @()
+    $queue = New-Object System.Collections.Generic.Queue[object]
+    $queue.Enqueue(@{ Path = $Root; Depth = 0 })
+
+    while ($queue.Count -gt 0) {
+        $current = $queue.Dequeue()
+        $subdirs = Get-ChildItem -LiteralPath $current.Path -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne 'node_modules' -and $_.Name -ne '.git' }
+
+        foreach ($sub in $subdirs) {
+            if (Test-Path -LiteralPath (Join-Path $sub.FullName "package.json") -PathType Leaf) {
+                $results += $sub.FullName
+            }
+            if ($current.Depth -lt $MaxDepth) {
+                $queue.Enqueue(@{ Path = $sub.FullName; Depth = $current.Depth + 1 })
+            }
+        }
+    }
+
+    return $results
 }
 
 function ConvertTo-PortMapping($Spec) {
@@ -306,6 +335,33 @@ $image         = "dev-sandbox:node$NodeVersion"
 $containerName = "dev-sandbox-$slug"
 $modulesVolume = "dev-sandbox-modules-$slug"
 
+# Shadow node_modules for the root package.json plus every nested workspace
+# (e.g. v1/package.json) so a Linux npm install never lands on the real
+# Windows filesystem. One named volume per package.json found, keyed off its
+# own full path so it is stable across restarts and never collides with
+# another project's. This scan happens once, at container creation -- a
+# workspace added later needs -Fresh to pick it up.
+$moduleMounts = @()
+if (-not $SharedModules) {
+    $moduleMounts += [pscustomobject]@{
+        ContainerPath = "/workspace/node_modules"
+        Volume        = $modulesVolume
+    }
+
+    # 4 levels deep covers every realistic monorepo layout (e.g.
+    # packages/scope/name) without risking a slow scan on a huge tree.
+    $nestedDirs = Find-NestedWorkspaceDirs -Root $projectPath -MaxDepth 4
+
+    foreach ($dir in $nestedDirs) {
+        $relPath = $dir.Substring($projectPath.Length).TrimStart('\') -replace '\\', '/'
+        $nestedSlug = Get-Slug $dir
+        $moduleMounts += [pscustomobject]@{
+            ContainerPath = "/workspace/$relPath/node_modules"
+            Volume        = "dev-sandbox-modules-$nestedSlug"
+        }
+    }
+}
+
 if ($Isolated) {
     $homeVolume = "dev-sandbox-home-isolated-$slug"
     $homeLabel  = "isolated, discarded on -Stop"
@@ -457,10 +513,11 @@ if (-not (Test-ContainerRunning $containerName)) {
         "-v", "$($homeVolume):/home/node"
     )
 
-    if (-not $SharedModules) {
-        # Shadow the host's node_modules: a Windows npm install produces Windows
-        # binaries and .cmd shims that break under Linux, and vice versa.
-        $runArgs += @("-v", "$($modulesVolume):/workspace/node_modules")
+    # Shadow the host's node_modules: a Windows npm install produces Windows
+    # binaries and .cmd shims that break under Linux, and vice versa. Covers
+    # the root and every nested workspace found above.
+    foreach ($mount in $moduleMounts) {
+        $runArgs += @("-v", "$($mount.Volume):$($mount.ContainerPath)")
     }
 
     $dockerPorts = Get-DockerPublishedHostPorts
@@ -501,12 +558,14 @@ if (-not (Test-ContainerRunning $containerName)) {
     if ($LASTEXITCODE -ne 0) { Fail "failed to start container" }
     $created = $true
 
-    if (-not $SharedModules) {
+    foreach ($mount in $moduleMounts) {
         # A fresh named volume mounted at a path that does not exist in the image
         # is created root:root, so the unprivileged node user cannot npm install
-        # into it. Hand it over once, at creation.
-        docker exec -u root $containerName chown node:node /workspace/node_modules | Out-Null
-        if ($LASTEXITCODE -ne 0) { Fail "failed to set ownership on /workspace/node_modules" }
+        # into it. Hand it over once, at creation. Nested paths need to exist
+        # first -- the volume only creates its own mount point.
+        docker exec -u root $containerName mkdir -p (Split-Path $mount.ContainerPath -Parent).Replace('\', '/') | Out-Null
+        docker exec -u root $containerName chown node:node $mount.ContainerPath | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "failed to set ownership on $($mount.ContainerPath)" }
     }
 }
 
