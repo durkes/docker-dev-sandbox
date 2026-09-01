@@ -4,15 +4,12 @@
 
 .DESCRIPTION
     Starts (or reuses) a Docker container with the project directory bind-mounted
-    at /workspace, then execs an interactive shell into it. Run the command again
-    from another PowerShell window to get another prompt in the same container.
-    By default the container stops as soon as no shell is left attached to it
-    (see -Persist); with two windows open side by side, closing one leaves it
-    running for the other.
+    at /workspace, then execs an interactive shell into it. Run it again from
+    another window for another prompt in the same container; the container stops
+    once no shell is left attached (see -Persist).
 
     The bind mount is the entire containment boundary: only the project directory
-    and its subdirectories are visible. Nothing above it, no Docker socket, no
-    --privileged.
+    and its subdirectories are visible. No Docker socket, no --privileged.
 
 .PARAMETER Path
     Project directory to mount. Defaults to the current directory.
@@ -33,9 +30,8 @@
     transcripts from your other projects.
 
 .PARAMETER SharedModules
-    Do not shadow /workspace/node_modules (and any node_modules of a nested
-    package.json, e.g. v1/node_modules) with a container-only volume. Only use
-    this if you never run npm from Windows for this project.
+    Do not shadow node_modules (root and nested package.json alike) with a
+    container-only volume. Only safe if you never run npm from Windows here.
 
 .PARAMETER Claude
     Launch Claude Code (--dangerously-skip-permissions) instead of a shell.
@@ -49,8 +45,7 @@
 
 .PARAMETER Persist
     Leave the container running after this shell exits, instead of stopping it
-    as soon as no other shell is attached. Use this to keep it warm across
-    windows opened one after another rather than side by side.
+    once no other shell is attached.
 
 .PARAMETER Stop
     Stop and remove this project's container (and its throwaway volume, if -Isolated).
@@ -105,8 +100,8 @@ function Fail($Message) {
 }
 
 function Get-Slug($AbsolutePath) {
-    # Folder name for readability + a hash of the full path, so two projects that
-    # happen to share a folder name never share volumes.
+    # Folder name for readability + a hash of the full path, so two projects
+    # sharing a folder name never share volumes.
     $leaf = (Split-Path $AbsolutePath -Leaf).ToLower()
     $leaf = $leaf -replace '[^a-z0-9]+', '-'
     $leaf = $leaf.Trim('-')
@@ -122,11 +117,9 @@ function Get-Slug($AbsolutePath) {
 }
 
 function Find-NestedWorkspaceDirs($Root, $MaxDepth) {
-    # Breadth-first, and critically: never descends into node_modules (or
-    # .git) at all, rather than filtering it out of the results afterward --
-    # walking into a real node_modules can mean thousands of package.json
-    # files. Depth is capped so a pathologically deep tree can't make this
-    # scan slow either.
+    # Never descends into node_modules or .git rather than filtering them out
+    # afterward -- walking a real node_modules means thousands of package.json
+    # files. Depth is capped so a deep tree can't make the scan slow either.
     $results = @()
     $queue = New-Object System.Collections.Generic.Queue[object]
     $queue.Enqueue(@{ Path = $Root; Depth = 0 })
@@ -150,22 +143,18 @@ function Find-NestedWorkspaceDirs($Root, $MaxDepth) {
 }
 
 function Get-ModuleMounts($ProjectPath, $Slug, $IsIsolated) {
-    # Shadow node_modules for the root package.json plus every nested workspace
-    # (e.g. v1/package.json) so a Linux npm install never lands on the real
-    # Windows filesystem. One named volume per package.json found, keyed off its
-    # own full path so it is stable across restarts and never collides with
-    # another project's.
+    # One named volume per package.json found (root plus nested workspaces), so a
+    # Linux npm install never lands on the real Windows filesystem. Keyed off the
+    # full path, so it is stable across restarts and never collides with another
+    # project's.
     #
-    # An -Isolated run gets its own namespace for these, not just for the home.
-    # Sharing them would hand whatever an untrusted `npm install` fetched
-    # straight to the next ordinary run of this project -- and would make the
-    # volumes unsafe to delete on -Stop, since they would be holding the real
-    # per-project node_modules too.
+    # -Isolated gets its own namespace for these, not just for the home: sharing
+    # would hand whatever an untrusted `npm install` fetched to the next ordinary
+    # run, and would make the volumes unsafe to delete on -Stop.
     #
-    # Only ever called when a container is about to be created: the mounts are
-    # fixed at that point, so -Stop and every later attach would be paying for
-    # the directory scan below and throwing the answer away. (Which also means a
-    # workspace added later needs -Fresh to pick it up.)
+    # Only called when a container is about to be created, since the mounts are
+    # fixed at that point -- which is also why a workspace added later needs
+    # -Fresh to pick it up.
     $prefix = if ($IsIsolated) { "dev-sandbox-modules-isolated-" } else { "dev-sandbox-modules-" }
 
     $mounts = @()
@@ -174,8 +163,8 @@ function Get-ModuleMounts($ProjectPath, $Slug, $IsIsolated) {
         Volume        = "$prefix$Slug"
     }
 
-    # 4 levels deep covers every realistic monorepo layout (e.g.
-    # packages/scope/name) without risking a slow scan on a huge tree.
+    # 4 levels covers every realistic monorepo layout (packages/scope/name)
+    # without risking a slow scan on a huge tree.
     foreach ($dir in (Find-NestedWorkspaceDirs -Root $ProjectPath -MaxDepth 4)) {
         $relPath = $dir.Substring($ProjectPath.Length).TrimStart('\') -replace '\\', '/'
         $mounts += [pscustomobject]@{
@@ -185,23 +174,22 @@ function Get-ModuleMounts($ProjectPath, $Slug, $IsIsolated) {
     }
 
     # Comma operator: a single mount would otherwise come back as a bare object
-    # rather than an array (same reason as Get-DockerPublishedHostPorts).
+    # rather than an array.
     return ,$mounts
 }
 
 function Test-PortNumber($Value) {
     # The digit bound comes first on purpose: [int] throws on a long enough run
-    # of digits, so an unbounded '^\d+$' would blow up here rather than reaching
-    # the range check it was meant to feed.
+    # of digits, so an unbounded '^\d+$' would blow up before the range check.
     if ($Value -notmatch '^\d{1,5}$') { return $false }
     $n = [int]$Value
     return ($n -ge 1 -and $n -le 65535)
 }
 
 function ConvertTo-PortMapping($Spec) {
-    # Validated rather than merely shaped: an out-of-range port used to sail
-    # through to Test-HostPortFree, where the ArgumentOutOfRange it caused was
-    # swallowed by the catch and surfaced 20 tries later as "no free host port".
+    # Validated, not merely shaped: an out-of-range port reaching
+    # Test-HostPortFree throws ArgumentOutOfRange, which its catch swallows and
+    # surfaces 20 tries later as a misleading "no free host port".
     $parts = @($Spec -split ':')
     if ($parts.Count -eq 1) { $parts = @($parts[0], $parts[0]) }
     if ($parts.Count -ne 2 -or -not (Test-PortNumber $parts[0]) -or -not (Test-PortNumber $parts[1])) {
@@ -212,20 +200,18 @@ function ConvertTo-PortMapping($Spec) {
 }
 
 function Get-DockerPublishedHostPorts {
-    # Docker Desktop's WSL2 backend publishes container ports without ever
-    # binding a plain Windows socket for them, so a raw TcpListener probe
-    # cannot see another container's published port -- it has to be asked
-    # for separately. This lets `docker run -p` fail with "port is already
-    # allocated" even though a Windows-side bind test claimed the port free.
+    # Docker Desktop's WSL2 backend publishes container ports without binding a
+    # plain Windows socket, so a TcpListener probe cannot see another
+    # container's published port and `docker run -p` then fails with "port is
+    # already allocated". Ask Docker separately.
     $ports = New-Object System.Collections.Generic.HashSet[int]
     docker ps --format '{{.Ports}}' | ForEach-Object {
         foreach ($m in [regex]::Matches($_, ':(\d+)->')) {
             [void]$ports.Add([int]$m.Groups[1].Value)
         }
     }
-    # The comma operator stops PowerShell from enumerating the HashSet onto the
-    # output stream -- without it, a 1-item set collapses to a bare [int] and a
-    # multi-item set becomes an [object[]], either of which breaks .Contains().
+    # Comma operator: without it PowerShell enumerates the HashSet onto the
+    # output stream, leaving an [int] or an [object[]] with no .Contains().
     return ,$ports
 }
 
@@ -242,8 +228,8 @@ function Test-HostPortFree([int]$HostPort, $DockerPorts) {
 }
 
 function Resolve-PortMapping($Spec, $DockerPorts) {
-    # Fixed at container creation, so a conflicting host port only needs to be
-    # dodged once here -- walk upward until a free one is found.
+    # Ports are fixed at container creation, so a conflict only needs dodging
+    # once: walk upward until a free host port is found.
     $mapping = ConvertTo-PortMapping $Spec
     $hostPort, $containerPort = $mapping -split ':'
     $hostPort = [int]$hostPort
@@ -252,7 +238,6 @@ function Resolve-PortMapping($Spec, $DockerPorts) {
     $maxTries = 20
     while (-not (Test-HostPortFree $hostPort $DockerPorts)) {
         $hostPort++
-        # Walking up from 65530 would otherwise leave the port range entirely.
         if ($hostPort -gt 65535) {
             Fail "no free host port found at or above $original before the end of the port range."
         }
@@ -268,17 +253,15 @@ function Resolve-PortMapping($Spec, $DockerPorts) {
 
 function Test-DockerReady {
     # No stderr redirection on native commands anywhere in this script -- neither
-    # 2>&1 nor 2>$null. In PowerShell 5.1 either one wraps the command's stderr
-    # in ErrorRecords, which $ErrorActionPreference = "Stop" turns into a
-    # terminating error the moment anything is written there, whatever the exit
-    # code. Left unredirected, stderr is harmless. So the pattern throughout is
-    # to check first (docker ps --filter, which is quiet) and only then run the
-    # command that would complain.
+    # 2>&1 nor 2>$null. PowerShell 5.1 wraps redirected stderr in ErrorRecords,
+    # which $ErrorActionPreference = "Stop" turns into a terminating error
+    # whatever the exit code; unredirected, stderr is harmless. Hence the pattern
+    # throughout: check quietly first (docker ps --filter), then run the command
+    # that would complain.
     #
-    # A missing executable is a different failure again -- PowerShell raises
-    # CommandNotFoundException before the process ever runs, so $LASTEXITCODE
-    # never gets a say. Check for it separately, or the friendly message below
-    # is replaced by a stack trace.
+    # A missing executable is a different failure: PowerShell raises
+    # CommandNotFoundException before the process runs, so $LASTEXITCODE never
+    # gets a say and the friendly message below would become a stack trace.
     if (-not (Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)) {
         Fail "docker not found on PATH. Is Docker Desktop installed?"
     }
@@ -290,7 +273,7 @@ function Test-DockerReady {
 
 function Test-ContainerRunning($Name) {
     # ps --filter rather than inspect: inspect writes to stderr when the
-    # container is absent, which is the normal case here, not an error.
+    # container is absent, which is normal here, not an error.
     $found = docker ps -q --filter "name=^$Name$"
     return (-not [string]::IsNullOrWhiteSpace(($found -join "")))
 }
@@ -302,12 +285,10 @@ function Test-ContainerExists($Name) {
 
 function Get-TokenFromPaste {
     # `claude setup-token` prints the token inside a block of prose, and a narrow
-    # terminal wraps the token itself across lines. Only whitespace gets into the
-    # paste that way, and whitespace is never part of a token -- so reassembly is
-    # just: find the fragment that starts the token, drop the spaces and the line
-    # breaks, and keep appending while the lines are still nothing but token
-    # characters. A prose line has a space or a full stop in it once the wrapping
-    # is undone, which is what ends the token.
+    # terminal wraps it across lines. Wrapping only inserts whitespace, which is
+    # never token content -- so reassembly is: find the fragment starting the
+    # token, strip whitespace, and keep appending while lines are nothing but
+    # token characters. Anything else is prose again, and ends the token.
     $token  = ""
     $blanks = 0
 
@@ -323,13 +304,11 @@ function Get-TokenFromPaste {
             continue
         }
         $blanks = 0
-        # Wrapping and indenting are the only things that get added to a pasted
-        # token, and neither is token content.
         $line = $line -replace '\s', ''
 
         if ($line -match 'sk-ant-oat[A-Za-z0-9_\-]*') {
-            # Start here, dropping any prefix ("export CLAUDE_CODE_OAUTH_TOKEN=")
-            # and any suffix that is not part of the token.
+            # Drops any prefix ("export CLAUDE_CODE_OAUTH_TOKEN=") and any
+            # non-token suffix.
             $token = $matches[0]
         } elseif ($token) {
             if ($line -match '^[A-Za-z0-9_\-]+$') {
@@ -342,8 +321,8 @@ function Get-TokenFromPaste {
 }
 
 function Clear-PastedInput {
-    # Whatever followed the token in the paste is still queued as keystrokes.
-    # Drop it so it does not land on the prompt after this script exits.
+    # Whatever followed the token is still queued as keystrokes. Drop it so it
+    # does not land on the prompt after this script exits.
     if ([Console]::IsInputRedirected) { return }
     while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
 }
@@ -354,15 +333,12 @@ function Test-VolumeExists($Name) {
 }
 
 function Test-ContainerHasOtherShell($Name) {
-    # Anything still running inside the container besides the "tail -f /dev/null"
-    # sentinel and its init wrapper means another window's shell (or something it
-    # started) is still attached. ps itself shows up in its own snapshot, so that
-    # line is filtered too.
+    # Anything running besides the "tail -f /dev/null" sentinel, its init
+    # wrapper, and this ps itself means another window's shell is still attached.
     #
-    # The existence check is what keeps docker exec off its stderr path: another
-    # window can have removed the container between this shell exiting and this
-    # call, and "Error: No such container" would then be fatal (again: 2>$null
-    # does not help, see Test-DockerReady).
+    # The existence check keeps docker exec off its stderr path: another window
+    # can have removed the container between this shell exiting and this call,
+    # and "Error: No such container" would be fatal (see Test-DockerReady).
     if (-not (Test-ContainerRunning $Name)) { return $false }
     $lines = docker exec $Name ps -eo args=
     if ($LASTEXITCODE -ne 0) { return $false }
@@ -378,16 +354,13 @@ function Test-ContainerHasOtherShell($Name) {
 }
 
 function Remove-IsolatedVolumes($Slug) {
-    # Every volume an -Isolated run creates -- the home and each node_modules
-    # shadow, nested ones included -- is tagged with this project's slug when it
-    # is created, so the whole set can be found and discarded without knowing
-    # their names here.
+    # Every volume an -Isolated run creates is labelled with this project's slug,
+    # so the whole set can be found without knowing their names here.
     #
-    # Labelling the volumes rather than the container is what makes this correct
-    # in the two cases that matter: $Isolated describes *this* invocation, not
-    # the one that created the container (so a plain "dev-sandbox -Stop", or
-    # another window being the last one to exit, still cleans up), and the tags
-    # outlive the container, so a crash or a reboot cannot strand a volume.
+    # Labelling the volumes rather than the container matters twice: $Isolated
+    # describes *this* invocation, not the one that created the container (so a
+    # plain "dev-sandbox -Stop" still cleans up), and the labels outlive the
+    # container, so a crash or reboot cannot strand a volume.
     $names = docker volume ls -q --filter "label=dev-sandbox.isolated-project=$Slug"
     foreach ($name in $names) {
         if (-not [string]::IsNullOrWhiteSpace($name)) {
@@ -404,8 +377,8 @@ function Remove-IsolatedVolumes($Slug) {
 }
 
 function New-IsolatedVolume($Name, $Slug) {
-    # Created up front purely so it can carry the label; docker run would
-    # otherwise conjure it unlabelled and it could never be found again.
+    # Created up front purely to carry the label; docker run would otherwise
+    # conjure it unlabelled, and it could never be found again.
     docker volume create --label "dev-sandbox.isolated-project=$Slug" $Name | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "failed to create volume $Name" }
 }
@@ -434,14 +407,14 @@ if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
 }
 $projectPath = $resolved.TrimEnd('\')
 
-# The mount is the whole containment boundary, so a too-broad mount silently
+# The mount is the whole containment boundary, so a too-broad one silently
 # defeats the point. Refuse the obvious mistakes.
 $usersRoot = if ($env:SystemDrive) { "$env:SystemDrive\Users" } else { "C:\Users" }
 $forbidden = @($env:USERPROFILE, $env:PUBLIC, $usersRoot) | Where-Object { $_ }
 
-# The root of *any* drive, not just the system one. $projectPath has already had
-# its trailing slash stripped, so "D:\" is "D:" by now -- which is exactly what
-# Split-Path -Qualifier returns. (It throws on a UNC path, which has no drive.)
+# The root of *any* drive, not just the system one. The trailing slash is
+# already stripped, so "D:\" is "D:" by now -- exactly what -Qualifier returns.
+# (It throws on a UNC path, which has no drive.)
 try { $qualifier = Split-Path $projectPath -Qualifier } catch { $qualifier = $null }
 if ($qualifier) { $forbidden += $qualifier }
 
@@ -451,8 +424,7 @@ foreach ($bad in $forbidden) {
     }
 }
 
-# Anything sitting directly under C:\Users is somebody's whole profile, whichever
-# account it happens to belong to.
+# Anything directly under C:\Users is somebody's whole profile.
 $projectParent = Split-Path $projectPath -Parent
 if ($projectParent -and ($projectParent.TrimEnd('\') -ieq $usersRoot.TrimEnd('\'))) {
     Fail "refusing to mount '$projectPath' -- that is a whole user profile, not a project directory."
@@ -506,7 +478,7 @@ if ([string]::IsNullOrWhiteSpace(($imageId -join ""))) {
     $needBuild = $true
     $buildReason = "image $image not found"
 } else {
-    # Read the label via JSON: PowerShell 5.1 mangles the double quotes that a
+    # Read the label via JSON: PowerShell 5.1 mangles the double quotes an
     # '{{index .Config.Labels "..."}}' template would need.
     $builtHash = ""
     $labelJson = docker image inspect $image --format '{{json .Config.Labels}}' 2>$null
@@ -555,9 +527,9 @@ if ($ClaudeAuth) {
         Fail "-ClaudeAuth needs an interactive console."
     }
 
-    # Prefer the host install: it is already the account you use on Windows, and
-    # it keeps the flow out of a container entirely. Otherwise run it in a
-    # throwaway container with its own config dir, so nothing is left behind.
+    # Prefer the host install: already the account you use on Windows, and it
+    # keeps the flow out of a container. Otherwise use a throwaway container with
+    # its own config dir, so nothing is left behind.
     $hostClaude = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue
     if ($hostClaude) {
         & $hostClaude.Source setup-token
@@ -600,14 +572,13 @@ if (-not (Test-ContainerRunning $containerName)) {
         docker rm -f $containerName | Out-Null
     }
 
-    # Deferred to here: this walks the project tree, and nothing above this
-    # point needs the answer.
+    # Deferred to here: this walks the project tree, and nothing above needs it.
     $moduleMounts = @()
     if (-not $SharedModules) {
         $moduleMounts = Get-ModuleMounts $projectPath $slug $Isolated
     }
 
-    # "Throwaway" has to mean it: volumes surviving a crash or a reboot would
+    # "Throwaway" has to mean it: volumes surviving a crash or reboot would
     # otherwise be mounted straight back into the new sandbox.
     if ($Isolated) {
         Remove-IsolatedVolumes $slug
@@ -620,8 +591,8 @@ if (-not (Test-ContainerRunning $containerName)) {
         "--name", $containerName,
         "--init",
         "--hostname", "sandbox",
-        # Not a hardened boundary, but free hardening. Note what is absent:
-        # no Docker socket mount, no --privileged, no extra capabilities.
+        # Not a hardened boundary, but free hardening. Note what is absent: no
+        # Docker socket mount, no --privileged, no extra capabilities.
         "--security-opt", "no-new-privileges",
         "-w", "/workspace",
         "-v", "$($projectPath):/workspace",
@@ -629,8 +600,7 @@ if (-not (Test-ContainerRunning $containerName)) {
     )
 
     # Shadow the host's node_modules: a Windows npm install produces Windows
-    # binaries and .cmd shims that break under Linux, and vice versa. Covers
-    # the root and every nested workspace found above.
+    # binaries and .cmd shims that break under Linux, and vice versa.
     foreach ($mount in $moduleMounts) {
         $runArgs += @("-v", "$($mount.Volume):$($mount.ContainerPath)")
     }
@@ -640,20 +610,17 @@ if (-not (Test-ContainerRunning $containerName)) {
     foreach ($p in $Port) {
         $resolvedMapping = Resolve-PortMapping $p $dockerPorts
         $resolvedPorts += $resolvedMapping
-        # Reserve it immediately so two bare ports in the same -Port list (or a
-        # remap that lands on an earlier pick) don't both resolve to the same
-        # free port before either is actually published.
+        # Reserve it immediately, or two entries in the same -Port list could
+        # both resolve to the same free port before either is published.
         $chosenHostPort = [int](($resolvedMapping -split ':')[0])
         [void]$dockerPorts.Add($chosenHostPort)
         $runArgs += @("-p", $resolvedMapping)
     }
 
     # Auth is forwarded from the host environment and never written to disk, so
-    # it works identically in every project and nothing secret can be committed.
-    # Without this the credentials Claude Code writes on login land in the
-    # per-project home volume, which is why a plain login has to be repeated for
-    # every new project. Either variable removes that entirely; -ClaudeAuth
-    # produces the OAuth one from a Claude subscription.
+    # nothing secret can be committed. Without it, the credentials Claude Code
+    # writes on login land in the per-project home volume -- which is why a plain
+    # login has to be repeated for every new project.
     if ($env:CLAUDE_CODE_OAUTH_TOKEN) {
         $runArgs += @("-e", "CLAUDE_CODE_OAUTH_TOKEN=$($env:CLAUDE_CODE_OAUTH_TOKEN)")
     }
@@ -663,10 +630,10 @@ if (-not (Test-ContainerRunning $containerName)) {
 
     # Identity only, no credentials. Commits and pushes happen on Windows.
     #
-    # Guarded because git on the host is optional -- the container ships its own,
-    # and this only copies a name across. Unguarded, a host without git would not
-    # merely skip this: CommandNotFoundException is terminating under
-    # $ErrorActionPreference = "Stop", so the sandbox would refuse to start.
+    # Guarded because host git is optional -- the container ships its own. Without
+    # the guard, a host without git would not merely skip this:
+    # CommandNotFoundException is terminating under "Stop", so the sandbox would
+    # refuse to start.
     if (Get-Command git -CommandType Application -ErrorAction SilentlyContinue) {
         $gitName  = git config --global user.name
         $gitEmail = git config --global user.email
@@ -681,27 +648,24 @@ if (-not (Test-ContainerRunning $containerName)) {
     $created = $true
 
     foreach ($mount in $moduleMounts) {
-        # A fresh named volume mounted at a path that does not exist in the image
-        # is created root:root, so the unprivileged node user cannot npm install
-        # into it. Hand it over once, at creation. Nested paths need to exist
-        # first -- the volume only creates its own mount point.
+        # A fresh named volume mounted at a path absent from the image is created
+        # root:root, so the unprivileged node user cannot npm install into it.
+        # Hand it over once, at creation. The parent has to be made first -- the
+        # volume only creates its own mount point.
         docker exec -u root $containerName mkdir -p (Split-Path $mount.ContainerPath -Parent).Replace('\', '/') | Out-Null
         docker exec -u root $containerName chown node:node $mount.ContainerPath | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail "failed to set ownership on $($mount.ContainerPath)" }
     }
 
-    # CLAUDE_CODE_OAUTH_TOKEN is enough to authenticate the interactive REPL --
-    # what actually stops -Claude from landing in a prompt on a brand new home
-    # volume is Claude Code's three first-run questions (theme, "do you trust
-    # this folder?", and the bypass-permissions warning). All three are answered
-    # by ~/.claude.json, so seed it. No credentials go in this file; auth still
-    # comes from the forwarded environment only.
+    # What stops -Claude from landing in a prompt on a brand new home volume is
+    # Claude Code's three first-run questions (theme, folder trust, and the
+    # bypass-permissions warning), not auth. All three are answered by
+    # ~/.claude.json, so seed it -- with no credentials; auth still comes from the
+    # forwarded environment only. Seeded only when absent, since the same file
+    # holds real settings and history for a reused home volume.
     #
-    # Seeded only when absent, since this same file also holds real settings and
-    # history for a reused home volume.
-    # Base64 because PowerShell 5.1 strips embedded double quotes when it hands
-    # an argument to a native command, which would deliver unquoted, unparseable
-    # JSON. The command below is deliberately free of them for the same reason.
+    # Base64 because PowerShell 5.1 strips embedded double quotes when passing an
+    # argument to a native command, delivering unparseable JSON.
     $seedJson = '{"hasCompletedOnboarding":true,"theme":"dark","bypassPermissionsModeAccepted":true,' +
                 '"projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}'
     $seedB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($seedJson))
@@ -732,10 +696,9 @@ if ($created) {
     } else {
         $portList = "none"
     }
-    # Compare on the container port alone. A host port that was walked upward at
-    # creation (3000 busy -> 3001:3000) still serves what was asked for, so
-    # matching whole "host:container" strings would wrongly report it missing and
-    # send you to -Stop for a port you already have.
+    # Compare on the container port alone: one walked upward at creation
+    # (3000 busy -> 3001:3000) still serves what was asked for, so matching whole
+    # "host:container" strings would send you to -Stop for a port you have.
     $publishedContainerPorts = @($published | ForEach-Object { ($_ -split ':')[1] })
     $missing = @()
     foreach ($p in $Port) {
@@ -767,8 +730,7 @@ if ($Persist) {
 }
 Write-Host ""
 
-# Allocate a TTY only when there actually is one. Passing -t with redirected
-# stdin (a CI step, a piped invocation) fails outright.
+# Allocate a TTY only when there is one: -t with redirected stdin fails outright.
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
     $ttyFlags = @("-i")
 } else {
@@ -779,15 +741,11 @@ $execArgs = @("exec") + $ttyFlags + @("-w", "/workspace", $containerName)
 
 # Every way in is a login shell, so all three see the same environment. Plain
 # `bash` would not: an interactive shell reads ~/.bashrc and skips the profile
-# files, while `bash -lc` reads /etc/profile and ~/.profile and gets nothing
-# from ~/.bashrc, which returns early when it is not interactive. Anything put
-# in ~/.profile was therefore invisible to a shell and anything in ~/.bashrc
-# invisible to -Command. With -l, both read the profile, and ~/.bashrc still
-# applies to the interactive one -- which is what ~/.bashrc is for.
+# files, while `bash -c` reads neither. With -l both read the profile, and
+# ~/.bashrc still applies to the interactive one.
 #
-# Claude Code goes through the same shell for the same reason: its own bash
-# tool calls inherit this environment, so a PATH set up in ~/.profile has to
-# reach it too.
+# Claude Code goes through the same shell so its own bash tool calls inherit
+# that environment -- a PATH set in ~/.profile has to reach them too.
 if ($Command) {
     $execArgs += @("bash", "-lc", $Command)
 } elseif ($Claude) {
