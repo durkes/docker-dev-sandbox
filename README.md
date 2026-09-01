@@ -56,15 +56,17 @@ once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 Do this and you never log in inside a sandbox again. Pick whichever fits your plan.
 
-**On a Claude subscription — `-SetupToken`:**
+**On a Claude subscription — `-ClaudeAuth`:**
 
 ```powershell
-dev-sandbox -SetupToken
+dev-sandbox -ClaudeAuth
 ```
 
-This runs Claude Code's long-lived token flow (approve in the browser, paste the
-printed `sk-ant-oat…` token back), then saves it to your Windows user environment as
-`CLAUDE_CODE_OAUTH_TOKEN`. Open a new PowerShell window afterwards.
+This runs Claude Code's long-lived token flow: approve in the browser, then paste
+back what it prints. You can paste the whole block — surrounding prose, the wrapped
+token, blank lines and all — and press Enter on an empty line; the wrapper finds the
+`sk-ant-oat…` token in it and reassembles it. It is then saved to your Windows user
+environment as `CLAUDE_CODE_OAUTH_TOKEN`. Open a new PowerShell window afterwards.
 
 **On API billing — set the key yourself:**
 
@@ -102,7 +104,7 @@ options above are the way out of it.
 | `dev-sandbox -Path ..\other-repo` | Mount somewhere other than the current folder |
 | `dev-sandbox -Command "npm ci"` | Run one command instead of a shell |
 | `dev-sandbox -Isolated` | Throwaway home volume, for untrusted third-party code |
-| `dev-sandbox -SetupToken` | Log in once on Windows so no sandbox ever asks again |
+| `dev-sandbox -ClaudeAuth` | Log in once on Windows so no sandbox ever asks again |
 | `dev-sandbox -Stop` | Shut the container down |
 
 Default published ports are **3000, 5173, 8080** (Next/CRA, Vite, and a generic
@@ -197,7 +199,7 @@ that channel entirely.
 
 This is also why a login done *inside* a sandbox only sticks for that project: the
 credentials Claude Code writes live in that project's home volume. Forward auth from
-the host instead (`dev-sandbox -SetupToken`, or `ANTHROPIC_API_KEY`) and the question
+the host instead (`dev-sandbox -ClaudeAuth`, or `ANTHROPIC_API_KEY`) and the question
 goes away without weakening the isolation — nothing is shared between projects except
 an environment variable you already own.
 

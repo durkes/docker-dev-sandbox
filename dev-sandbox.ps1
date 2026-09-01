@@ -38,7 +38,7 @@
 .PARAMETER Command
     Run this command instead of an interactive shell.
 
-.PARAMETER SetupToken
+.PARAMETER ClaudeAuth
     Run the Claude Code long-lived token flow once, then save the token to your
     Windows user environment so every future sandbox starts already logged in.
 
@@ -63,7 +63,7 @@
     Publish Vite's port and drop straight into Claude Code.
 
 .EXAMPLE
-    dev-sandbox -SetupToken
+    dev-sandbox -ClaudeAuth
     Log in once, here, and never again in any project sandbox.
 #>
 [CmdletBinding()]
@@ -75,7 +75,7 @@ param(
     [switch]   $SharedModules,
     [switch]   $Claude,
     [string]   $Command,
-    [switch]   $SetupToken,
+    [switch]   $ClaudeAuth,
     [switch]   $Stop,
     [switch]   $Fresh,
     [switch]   $Rebuild,
@@ -136,6 +136,50 @@ function Test-ContainerRunning($Name) {
 function Test-ContainerExists($Name) {
     $found = docker ps -aq --filter "name=^$Name$"
     return (-not [string]::IsNullOrWhiteSpace(($found -join "")))
+}
+
+function Get-TokenFromPaste {
+    # `claude setup-token` prints the token inside a block of prose, and a narrow
+    # terminal wraps the token itself across lines. So take the whole paste and
+    # reassemble: find the fragment that starts the token, then keep appending
+    # lines that are made purely of token characters. Prose lines always contain
+    # a space or punctuation, so they cannot be mistaken for a fragment.
+    $token  = ""
+    $blanks = 0
+
+    while ($true) {
+        $line = Read-Host
+
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            if ($token) { return $token }
+            # A blank line inside the pasted block is normal. Two in a row with
+            # nothing found means there was no token in it.
+            $blanks++
+            if ($blanks -ge 2) { return $null }
+            continue
+        }
+        $blanks = 0
+        $line = $line.Trim()
+
+        if ($line -match 'sk-ant-oat[A-Za-z0-9_\-]*') {
+            # Start here, dropping any prefix ("export CLAUDE_CODE_OAUTH_TOKEN=")
+            # and any suffix that is not part of the token.
+            $token = $matches[0]
+        } elseif ($token) {
+            if ($line -match '^[A-Za-z0-9_\-]+$') {
+                $token += $line          # a wrapped continuation
+            } else {
+                return $token            # prose again: the token ended
+            }
+        }
+    }
+}
+
+function Clear-PastedInput {
+    # Whatever followed the token in the paste is still queued as keystrokes.
+    # Drop it so it does not land on the prompt after this script exits.
+    if ([Console]::IsInputRedirected) { return }
+    while ([Console]::KeyAvailable) { [Console]::ReadKey($true) | Out-Null }
 }
 
 function Test-VolumeExists($Name) {
@@ -259,13 +303,17 @@ if ($needBuild) {
 }
 
 # --------------------------------------------------------------------------
-# -SetupToken
+# -ClaudeAuth
 # --------------------------------------------------------------------------
 
-if ($SetupToken) {
+if ($ClaudeAuth) {
     Write-Host "dev-sandbox: starting the Claude Code long-lived token flow." -ForegroundColor Cyan
-    Write-Host "  Approve in the browser, then paste the token it prints back here." -ForegroundColor DarkGray
+    Write-Host "  Approve in the browser, then paste what it prints back here." -ForegroundColor DarkGray
     Write-Host ""
+
+    if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        Fail "-ClaudeAuth needs an interactive console."
+    }
 
     # Prefer the host install: it is already the account you use on Windows, and
     # it keeps the flow out of a container entirely. Otherwise run it in a
@@ -274,16 +322,16 @@ if ($SetupToken) {
     if ($hostClaude) {
         & $hostClaude.Source setup-token
     } else {
-        if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
-            Fail "-SetupToken needs an interactive console when claude is not installed on Windows."
-        }
         docker run --rm -i -t -e "CLAUDE_CONFIG_DIR=/tmp/claude-setup" $image claude setup-token
     }
 
     Write-Host ""
-    $token = (Read-Host "Paste the token").Trim()
-    if (-not $token.StartsWith("sk-ant-oat")) {
-        Fail "that does not look like a setup token (expected it to start with sk-ant-oat). Nothing was saved."
+    Write-Host "Paste the token -- the surrounding output is fine, and it may wrap." -ForegroundColor Cyan
+    Write-Host "Press Enter on an empty line when you are done." -ForegroundColor DarkGray
+    $token = Get-TokenFromPaste
+    Clear-PastedInput
+    if (-not $token) {
+        Fail "no sk-ant-oat... token found in what you pasted. Nothing was saved."
     }
 
     [Environment]::SetEnvironmentVariable("CLAUDE_CODE_OAUTH_TOKEN", $token, "User")
@@ -339,7 +387,7 @@ if (-not (Test-ContainerRunning $containerName)) {
     # it works identically in every project and nothing secret can be committed.
     # Without this the credentials Claude Code writes on login land in the
     # per-project home volume, which is why a plain login has to be repeated for
-    # every new project. Either variable removes that entirely; -SetupToken
+    # every new project. Either variable removes that entirely; -ClaudeAuth
     # produces the OAuth one from a Claude subscription.
     if ($env:CLAUDE_CODE_OAUTH_TOKEN) {
         $runArgs += @("-e", "CLAUDE_CODE_OAUTH_TOKEN=$($env:CLAUDE_CODE_OAUTH_TOKEN)")
@@ -404,7 +452,7 @@ if ($env:CLAUDE_CODE_OAUTH_TOKEN) {
 } elseif ($env:ANTHROPIC_API_KEY) {
     $auth = "api key forwarded"
 } else {
-    $auth = "no host auth, claude will prompt to log in (run 'dev-sandbox -SetupToken' once to stop that)"
+    $auth = "no host auth, claude will prompt to log in (run 'dev-sandbox -ClaudeAuth' once to stop that)"
 }
 
 Write-Host ""
