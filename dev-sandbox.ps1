@@ -149,6 +149,46 @@ function Find-NestedWorkspaceDirs($Root, $MaxDepth) {
     return $results
 }
 
+function Get-ModuleMounts($ProjectPath, $Slug, $IsIsolated) {
+    # Shadow node_modules for the root package.json plus every nested workspace
+    # (e.g. v1/package.json) so a Linux npm install never lands on the real
+    # Windows filesystem. One named volume per package.json found, keyed off its
+    # own full path so it is stable across restarts and never collides with
+    # another project's.
+    #
+    # An -Isolated run gets its own namespace for these, not just for the home.
+    # Sharing them would hand whatever an untrusted `npm install` fetched
+    # straight to the next ordinary run of this project -- and would make the
+    # volumes unsafe to delete on -Stop, since they would be holding the real
+    # per-project node_modules too.
+    #
+    # Only ever called when a container is about to be created: the mounts are
+    # fixed at that point, so -Stop and every later attach would be paying for
+    # the directory scan below and throwing the answer away. (Which also means a
+    # workspace added later needs -Fresh to pick it up.)
+    $prefix = if ($IsIsolated) { "dev-sandbox-modules-isolated-" } else { "dev-sandbox-modules-" }
+
+    $mounts = @()
+    $mounts += [pscustomobject]@{
+        ContainerPath = "/workspace/node_modules"
+        Volume        = "$prefix$Slug"
+    }
+
+    # 4 levels deep covers every realistic monorepo layout (e.g.
+    # packages/scope/name) without risking a slow scan on a huge tree.
+    foreach ($dir in (Find-NestedWorkspaceDirs -Root $ProjectPath -MaxDepth 4)) {
+        $relPath = $dir.Substring($ProjectPath.Length).TrimStart('\') -replace '\\', '/'
+        $mounts += [pscustomobject]@{
+            ContainerPath = "/workspace/$relPath/node_modules"
+            Volume        = "$prefix$(Get-Slug $dir)"
+        }
+    }
+
+    # Comma operator: a single mount would otherwise come back as a bare object
+    # rather than an array (same reason as Get-DockerPublishedHostPorts).
+    return ,$mounts
+}
+
 function ConvertTo-PortMapping($Spec) {
     if ($Spec -match '^\d+$') { return "$($Spec):$($Spec)" }
     if ($Spec -match '^\d+:\d+$') { return $Spec }
@@ -214,6 +254,14 @@ function Test-DockerReady {
     # code. Left unredirected, stderr is harmless. So the pattern throughout is
     # to check first (docker ps --filter, which is quiet) and only then run the
     # command that would complain.
+    #
+    # A missing executable is a different failure again -- PowerShell raises
+    # CommandNotFoundException before the process ever runs, so $LASTEXITCODE
+    # never gets a say. Check for it separately, or the friendly message below
+    # is replaced by a stack trace.
+    if (-not (Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)) {
+        Fail "docker not found on PATH. Is Docker Desktop installed?"
+    }
     docker info --format '{{.ServerVersion}}' | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Fail "cannot reach the Docker daemon. Is Docker Desktop running?"
@@ -394,40 +442,6 @@ $slug          = Get-Slug $projectPath
 $image         = "dev-sandbox:node$NodeVersion"
 $containerName = "dev-sandbox-$slug"
 
-# An -Isolated run gets its own namespace for the node_modules shadows, not just
-# for the home. Sharing them would hand whatever an untrusted `npm install`
-# fetched straight to the next ordinary run of this project -- and would make the
-# volumes unsafe to delete on -Stop, since they would be holding the real
-# per-project node_modules too.
-$modulesPrefix = if ($Isolated) { "dev-sandbox-modules-isolated-" } else { "dev-sandbox-modules-" }
-
-# Shadow node_modules for the root package.json plus every nested workspace
-# (e.g. v1/package.json) so a Linux npm install never lands on the real
-# Windows filesystem. One named volume per package.json found, keyed off its
-# own full path so it is stable across restarts and never collides with
-# another project's. This scan happens once, at container creation -- a
-# workspace added later needs -Fresh to pick it up.
-$moduleMounts = @()
-if (-not $SharedModules) {
-    $moduleMounts += [pscustomobject]@{
-        ContainerPath = "/workspace/node_modules"
-        Volume        = "$modulesPrefix$slug"
-    }
-
-    # 4 levels deep covers every realistic monorepo layout (e.g.
-    # packages/scope/name) without risking a slow scan on a huge tree.
-    $nestedDirs = Find-NestedWorkspaceDirs -Root $projectPath -MaxDepth 4
-
-    foreach ($dir in $nestedDirs) {
-        $relPath = $dir.Substring($projectPath.Length).TrimStart('\') -replace '\\', '/'
-        $nestedSlug = Get-Slug $dir
-        $moduleMounts += [pscustomobject]@{
-            ContainerPath = "/workspace/$relPath/node_modules"
-            Volume        = "$modulesPrefix$nestedSlug"
-        }
-    }
-}
-
 if ($Isolated) {
     $homeVolume = "dev-sandbox-home-isolated-$slug"
     $homeLabel  = "isolated, discarded with node_modules on -Stop"
@@ -566,6 +580,13 @@ if (-not (Test-ContainerRunning $containerName)) {
         docker rm -f $containerName | Out-Null
     }
 
+    # Deferred to here: this walks the project tree, and nothing above this
+    # point needs the answer.
+    $moduleMounts = @()
+    if (-not $SharedModules) {
+        $moduleMounts = Get-ModuleMounts $projectPath $slug $Isolated
+    }
+
     # "Throwaway" has to mean it: volumes surviving a crash or a reboot would
     # otherwise be mounted straight back into the new sandbox.
     if ($Isolated) {
@@ -621,10 +642,17 @@ if (-not (Test-ContainerRunning $containerName)) {
     }
 
     # Identity only, no credentials. Commits and pushes happen on Windows.
-    $gitName  = git config --global user.name 2>$null
-    $gitEmail = git config --global user.email 2>$null
-    if ($gitName)  { $runArgs += @("-e", "GIT_AUTHOR_NAME=$gitName",   "-e", "GIT_COMMITTER_NAME=$gitName") }
-    if ($gitEmail) { $runArgs += @("-e", "GIT_AUTHOR_EMAIL=$gitEmail", "-e", "GIT_COMMITTER_EMAIL=$gitEmail") }
+    #
+    # Guarded because git on the host is optional -- the container ships its own,
+    # and this only copies a name across. Unguarded, a host without git would not
+    # merely skip this: CommandNotFoundException is terminating under
+    # $ErrorActionPreference = "Stop", so the sandbox would refuse to start.
+    if (Get-Command git -CommandType Application -ErrorAction SilentlyContinue) {
+        $gitName  = git config --global user.name
+        $gitEmail = git config --global user.email
+        if ($gitName)  { $runArgs += @("-e", "GIT_AUTHOR_NAME=$gitName",   "-e", "GIT_COMMITTER_NAME=$gitName") }
+        if ($gitEmail) { $runArgs += @("-e", "GIT_AUTHOR_EMAIL=$gitEmail", "-e", "GIT_COMMITTER_EMAIL=$gitEmail") }
+    }
 
     $runArgs += @($image, "tail", "-f", "/dev/null")
 
