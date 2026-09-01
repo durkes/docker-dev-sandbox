@@ -19,6 +19,7 @@
 
 .PARAMETER Port
     Host ports to publish. Accepts bare ports (3000) or remaps (8081:8080).
+    If a host port is already taken, it walks upward to the next free one.
     Ports are fixed when the container is created -- use -Stop first to change them.
 
 .PARAMETER Isolated
@@ -122,6 +123,57 @@ function ConvertTo-PortMapping($Spec) {
     if ($Spec -match '^\d+$') { return "$($Spec):$($Spec)" }
     if ($Spec -match '^\d+:\d+$') { return $Spec }
     Fail "invalid -Port value '$Spec'. Use 3000 or 8081:8080."
+}
+
+function Get-DockerPublishedHostPorts {
+    # Docker Desktop's WSL2 backend publishes container ports without ever
+    # binding a plain Windows socket for them, so a raw TcpListener probe
+    # cannot see another container's published port -- it has to be asked
+    # for separately. This lets `docker run -p` fail with "port is already
+    # allocated" even though a Windows-side bind test claimed the port free.
+    $ports = New-Object System.Collections.Generic.HashSet[int]
+    docker ps --format '{{.Ports}}' | ForEach-Object {
+        foreach ($m in [regex]::Matches($_, ':(\d+)->')) {
+            [void]$ports.Add([int]$m.Groups[1].Value)
+        }
+    }
+    # The comma operator stops PowerShell from enumerating the HashSet onto the
+    # output stream -- without it, a 1-item set collapses to a bare [int] and a
+    # multi-item set becomes an [object[]], either of which breaks .Contains().
+    return ,$ports
+}
+
+function Test-HostPortFree([int]$HostPort, $DockerPorts) {
+    if ($DockerPorts.Contains($HostPort)) { return $false }
+    try {
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $HostPort)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-PortMapping($Spec, $DockerPorts) {
+    # Fixed at container creation, so a conflicting host port only needs to be
+    # dodged once here -- walk upward until a free one is found.
+    $mapping = ConvertTo-PortMapping $Spec
+    $hostPort, $containerPort = $mapping -split ':'
+    $hostPort = [int]$hostPort
+    $original = $hostPort
+
+    $maxTries = 20
+    while (-not (Test-HostPortFree $hostPort $DockerPorts)) {
+        $hostPort++
+        if ($hostPort - $original -ge $maxTries) {
+            Fail "no free host port found near $original after $maxTries tries."
+        }
+    }
+    if ($hostPort -ne $original) {
+        Write-Host "dev-sandbox: port $original is in use, using $hostPort instead" -ForegroundColor Yellow
+    }
+    return "$($hostPort):$($containerPort)"
 }
 
 function Test-DockerReady {
@@ -411,8 +463,17 @@ if (-not (Test-ContainerRunning $containerName)) {
         $runArgs += @("-v", "$($modulesVolume):/workspace/node_modules")
     }
 
+    $dockerPorts = Get-DockerPublishedHostPorts
+    $resolvedPorts = @()
     foreach ($p in $Port) {
-        $runArgs += @("-p", (ConvertTo-PortMapping $p))
+        $resolvedMapping = Resolve-PortMapping $p $dockerPorts
+        $resolvedPorts += $resolvedMapping
+        # Reserve it immediately so two bare ports in the same -Port list (or a
+        # remap that lands on an earlier pick) don't both resolve to the same
+        # free port before either is actually published.
+        $chosenHostPort = [int](($resolvedMapping -split ':')[0])
+        [void]$dockerPorts.Add($chosenHostPort)
+        $runArgs += @("-p", $resolvedMapping)
     }
 
     # Auth is forwarded from the host environment and never written to disk, so
@@ -455,7 +516,7 @@ if (-not (Test-ContainerRunning $containerName)) {
 
 if ($created) {
     $verb = "started"
-    $portList = ($Port | ForEach-Object { ConvertTo-PortMapping $_ }) -join " "
+    $portList = $resolvedPorts -join " "
 } else {
     # Ports are fixed when the container is created, so report what it actually
     # publishes rather than what was asked for on this invocation.
