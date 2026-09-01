@@ -1,0 +1,10 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# These are consumed by Linux inside the container: CRLF breaks RUN line
+# continuations and shebangs, so pin them to LF regardless of platform.
+Dockerfile text eol=lf
+*.sh        text eol=lf
+
+# PowerShell runs on Windows; CRLF is the native convention.
+*.ps1       text eol=crlf

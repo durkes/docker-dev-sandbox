@@ -1,0 +1,38 @@
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS (in case this repo is ever opened elsewhere)
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+*.tsbuildinfo
+
+# Env / secrets -- nothing in this repo should ever hold a credential.
+# The sandbox forwards ANTHROPIC_API_KEY from the host environment; it is never
+# written to disk. Keep it that way.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local state (settings.local.json is machine-specific)
+.claude/settings.local.json
+
+# Local scratch
+scratch/
+tmp/
