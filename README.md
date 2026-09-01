@@ -1,10 +1,10 @@
 # docker-dev-sandbox
 
 A reusable Docker sandbox for Node projects on Windows, so you can let AI agents
-run wild inside a project without giving it access to your whole machine.
+run wild inside a project without giving them access to your whole machine.
 
 The image holds **no project code**. Your project is bind-mounted in at run time, so
-one image serves every repo you own. From any project folder:
+one image serves every repo. From any project folder:
 
 ```powershell
 cd C:\Users\[user]\Documents\GitHub\some-project
@@ -26,11 +26,11 @@ cd C:\Users\[user]\Documents\GitHub\docker-dev-sandbox
 .\dev-sandbox.ps1 -Rebuild -Command "node --version"
 ```
 
-The wrapper builds automatically whenever the image is missing or the `Dockerfile`
-has changed since the image was built, so you rarely need `-Rebuild` by hand.
+The wrapper also builds automatically whenever the image is missing or the
+`Dockerfile` has changed, so you rarely need `-Rebuild` by hand.
 
-Current image: `dev-sandbox:node24`, ~809 MB, Node v24.20.0 ("Krypton", the Active
-LTS line), Claude Code 2.1.252.
+Current image: `dev-sandbox:node24`, ~809 MB, Node v24.20.0 (Active LTS),
+Claude Code 2.1.252.
 
 ### 2. Add the `dev-sandbox` function to your PowerShell profile
 
@@ -54,8 +54,6 @@ once: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 ### 3. Authenticate once, for every project
 
-Do this and you never log in inside a sandbox again. Pick whichever fits your plan.
-
 **On a Claude subscription — `-ClaudeAuth`:**
 
 ```powershell
@@ -63,11 +61,11 @@ dev-sandbox -ClaudeAuth
 ```
 
 This runs Claude Code's long-lived token flow: approve in the browser, then paste
-back what it prints. You can paste the whole block — surrounding prose, the wrapped
-token, blank lines and all — and press Enter on an empty line; the wrapper finds the
-`sk-ant-oat…` token in it and reassembles it, ignoring the spaces and line breaks the
-terminal added. It is then saved to your Windows user environment as
-`CLAUDE_CODE_OAUTH_TOKEN`. Open a new PowerShell window afterwards.
+back what it prints. Paste the whole block — prose, wrapped token, blank lines and
+all — and press Enter on an empty line; the wrapper finds the `sk-ant-oat…` token
+and reassembles it around the terminal's line breaks. It is saved to your Windows
+user environment as `CLAUDE_CODE_OAUTH_TOKEN`. Open a new PowerShell window
+afterwards.
 
 **On API billing — set the key yourself:**
 
@@ -76,20 +74,19 @@ terminal added. It is then saved to your Windows user environment as
 ```
 
 Either way the wrapper forwards the value into the container as an environment
-variable at creation time. It is **never written to disk** — not into the project,
-not into a volume — so there is nothing to accidentally commit, and Claude Code
-works immediately in every project with no per-repo login. `CLAUDE_CODE_OAUTH_TOKEN`
-wins if both are set. The banner's `home` line tells you which one is in play.
+variable at creation time. It is **never written to disk**, so there is nothing to
+accidentally commit and Claude Code works immediately in every project with no
+per-repo login. `CLAUDE_CODE_OAUTH_TOKEN` wins if both are set; the banner's `home`
+line tells you which is in play.
 
 Containers already running were created with the old environment, so refresh them
 with `dev-sandbox -Stop` on your next visit to that project.
 
-If you set neither, Claude Code falls back to its interactive login: run `claude`,
-paste the printed URL into your Windows browser, approve, paste the code back. Those
-credentials land in the project's home volume, **so you log in again for every new
-project** — that is the per-project home volume working as designed
-(see [Cross-project isolation](#cross-project-isolation)), not a bug, and the two
-options above are the way out of it.
+If you set neither, Claude Code falls back to its interactive login, and those
+credentials land in the project's home volume — **so you log in again for every new
+project**. That is the per-project home volume working as designed (see
+[Cross-project isolation](#cross-project-isolation)), and the two options above are
+the way out of it.
 
 ---
 
@@ -109,32 +106,28 @@ options above are the way out of it.
 | `dev-sandbox -Persist` | Keep the container running after this shell exits |
 | `dev-sandbox -Stop` | Shut the container down |
 
-Default published ports are **3000, 5173, 8080** (Next/CRA, Vite, and a generic
-spare). Publishing an unused port costs nothing, so you rarely need `-Port` at all.
+Default published ports are **3000, 5173, 8080** (Next/CRA, Vite, and a spare).
+Publishing an unused port costs nothing, so you rarely need `-Port` at all.
 
 ### Multiple prompts in the same sandbox
 
 Each `dev-sandbox` invocation `exec`s a new shell into the project's container,
-creating it first if needed. So: open a second PowerShell window, `cd` to the same
-project, type `dev-sandbox`, and you get a second independent prompt in the *same*
-container — sharing the same filesystem, the same processes, and the same localhost.
-
-A typical layout is three windows: `npm run dev` in one, `claude` in another,
-`git`/`npm` in a third.
+creating it first if needed. So a second PowerShell window `cd`'d to the same
+project gives you a second independent prompt in the *same* container — same
+filesystem, same processes, same localhost. A typical layout is three windows:
+`npm run dev`, `claude`, and `git`/`npm`.
 
 Two consequences:
 
-- **The container stops itself once the last shell exits.** With three windows open,
-  closing one leaves the container running for the other two; closing the last one
-  stops it (and your dev server with it). Pass `-Persist` to keep it running solo,
-  e.g. for a long build you want to walk away from.
-- **Published ports are fixed when the container is created.** If you ask for a port
-  that is not published, the banner tells you so; run `dev-sandbox -Stop` and start
-  again with the port you want.
+- **The container stops itself once the last shell exits.** Closing one of three
+  windows leaves it running for the other two; closing the last stops it, and your
+  dev server with it. `-Persist` keeps it running solo, e.g. for a long build.
+- **Published ports are fixed when the container is created.** Ask for a port that
+  is not published and the banner says so; `dev-sandbox -Stop` and start again with
+  the port you want.
 
-Each project gets its own container, named `dev-sandbox-<folder>-<hash>` — the hash
-is derived from the full path, so two projects with the same folder name never
-collide.
+Each project gets its own container, `dev-sandbox-<folder>-<hash>` — the hash is
+derived from the full path, so two projects with the same folder name never collide.
 
 ### Previewing the app
 
@@ -153,7 +146,7 @@ normal Windows browser.
 > - Next.js: `next dev -H 0.0.0.0`.
 > - `create-react-app`: `HOST=0.0.0.0 npm start`.
 >
-> Quick check from inside the container: `ss -ltnp` — you want `0.0.0.0:3000` or
+> Check from inside the container with `ss -ltnp`: you want `0.0.0.0:3000` or
 > `*:3000`, not `127.0.0.1:3000`.
 
 ---
@@ -164,12 +157,11 @@ normal Windows browser.
 
 Exactly one project directory is bind-mounted, at `/workspace`. Nothing above it
 exists inside the container — `/workspace/..` is the container's own root
-filesystem, not your Documents folder. The wrapper refuses to mount the root of any drive,
-`C:\Users`, or any user profile under it.
+filesystem, not your Documents folder. The wrapper refuses to mount the root of any
+drive, `C:\Users`, or any user profile under it.
 
-Also absent, deliberately: no Docker socket mount (which would be a trivial root
-escape), no `--privileged`, no added capabilities, and `--security-opt
-no-new-privileges` is set.
+Also absent, deliberately: no Docker socket mount (a trivial root escape), no
+`--privileged`, no added capabilities, and `--security-opt no-new-privileges` is set.
 
 ### `node_modules` is shadowed
 
@@ -178,44 +170,40 @@ and Windows keep **separate dependency trees**. This is not optional hygiene: a
 Windows `npm install` produces Windows-native binaries and `.cmd` shims that break
 under Linux, and vice versa.
 
-So the first time you enter a project, run `npm ci` (or `npm install`) *inside* the
-container. Your Windows-side `node_modules` is untouched and still works for
+So run `npm ci` (or `npm install`) *inside* the container the first time you enter a
+project. Your Windows-side `node_modules` is untouched and still works for
 Windows-side commands. `-SharedModules` turns the shadowing off if you only ever run
 npm from one side.
 
-If `npm install` ever fails with `EACCES ... mkdir '/workspace/node_modules/...'`,
-the volume is owned by root instead of the `node` user. The wrapper fixes ownership
-when it creates a container, so `dev-sandbox -Stop` followed by `dev-sandbox`
-resolves it without losing the volume.
+If `npm install` fails with `EACCES ... mkdir '/workspace/node_modules/...'`, the
+volume is owned by root instead of the `node` user. The wrapper fixes ownership when
+it creates a container, so `dev-sandbox -Stop` then `dev-sandbox` resolves it
+without losing the volume.
 
-**Monorepos:** every `package.json` under the project (e.g. `v1/package.json`,
-`packages/*/package.json`) gets its own volume shadowing its `node_modules`, found
-by scanning the project when the container is created. Adding a new nested
-workspace later needs `dev-sandbox -Fresh` to pick it up.
+**Monorepos:** every `package.json` under the project (e.g. `packages/*/package.json`)
+gets its own volume shadowing its `node_modules`, found by scanning the project when
+the container is created. Adding a nested workspace later needs `dev-sandbox -Fresh`
+to pick it up.
 
 ### Cross-project isolation
 
 Each project gets its own home volume, `dev-sandbox-home-<slug>`, mounted at
 `/home/node`. This matters because Claude Code writes full session transcripts to
 `~/.claude/projects/<path>/*.jsonl` and a project registry to `~/.claude.json`. With
-a single shared home volume, a Claude session in repo B could read repo A's
-transcripts — they would sit in its own home directory. Per-project volumes remove
-that channel entirely.
+a single shared home, a Claude session in repo B could read repo A's transcripts;
+per-project volumes remove that channel entirely.
 
-This is also why a login done *inside* a sandbox only sticks for that project: the
-credentials Claude Code writes live in that project's home volume. Forward auth from
-the host instead (`dev-sandbox -ClaudeAuth`, or `ANTHROPIC_API_KEY`) and the question
-goes away without weakening the isolation — nothing is shared between projects except
-an environment variable you already own.
+It is also why a login done *inside* a sandbox only sticks for that project. Forward
+auth from the host instead (`dev-sandbox -ClaudeAuth`, or `ANTHROPIC_API_KEY`) and
+the question goes away without weakening the isolation.
 
-`-SharedHome` opts back into one shared volume if you want shared settings across
-projects and are comfortable with that trade. It shares transcripts too, so it is the
-wrong tool for merely sharing a login.
+`-SharedHome` opts back into one shared volume for shared settings across projects.
+It shares transcripts too, so it is the wrong tool for merely sharing a login.
 
 `-Isolated` goes the other way: throwaway home *and* `node_modules` volumes that
-`-Stop` deletes. They are separate from the ones an ordinary run of the same
-project uses, so nothing an untrusted `npm install` fetched is still mounted the
-next time you open a normal sandbox there.
+`-Stop` deletes. They are separate from the ones an ordinary run of the same project
+uses, so nothing an untrusted `npm install` fetched is still mounted the next time
+you open a normal sandbox there.
 
 ### Git
 
@@ -232,13 +220,11 @@ root-owned inside the container and git would otherwise refuse to touch it as
 
 ### What Claude Code writes into your project
 
-Two things worth knowing, since they land in the bind mount and therefore in front
-of GitHub Desktop:
+Two things land in the bind mount, and therefore in front of GitHub Desktop. Neither
+contains credentials.
 
 - `.claude/settings.local.json` — machine-local settings. Usually worth gitignoring.
 - `CLAUDE.md` — project instructions. Usually worth *committing*.
-
-Neither contains credentials.
 
 ---
 
@@ -246,22 +232,22 @@ Neither contains credentials.
 
 **This is isolation, not a hardened security boundary.**
 
-Container escapes exist and are found regularly. What you get here is a meaningful
+Container escapes exist and are found regularly. What you get is a meaningful
 reduction in blast radius — an agent that goes wrong can trash the mounted project
 and nothing else it can see — plus a genuinely useful second layer, because Docker
 Desktop runs everything inside a WSL2 virtual machine rather than directly on the
 Windows kernel.
 
-That combination is solid for the actual use case: **letting an agent loose on your
-own code without risking the rest of your machine.** It is *not* sufficient for
-deliberately running code you believe to be malicious. For that you want a
-disposable VM, and ideally not one sharing a kernel with anything you care about.
+That is solid for the actual use case: **letting an agent loose on your own code
+without risking the rest of your machine.** It is *not* sufficient for deliberately
+running code you believe to be malicious. For that you want a disposable VM, and
+ideally not one sharing a kernel with anything you care about.
 
 Specifically:
 
 - **Network access is unrestricted by default.** It has to be — the Claude API and
-  the npm registry both need it. Anything running in the container can reach the
-  internet and can reach services listening on your Windows host.
+  the npm registry both need it. Anything in the container can reach the internet
+  and services listening on your Windows host.
 - **Your API key or OAuth token is in the container's environment**, readable by any
   process in it. That is the cost of not re-authenticating per project — and it
   applies to `-Isolated` containers too, so drop the variable from that shell
@@ -287,9 +273,9 @@ docker exec -u root -it dev-sandbox-<slug> apt-get update
 docker exec -u root -it dev-sandbox-<slug> apt-get install -y imagemagick
 ```
 
-Find `<slug>` with `docker ps`. If you need the package permanently, add it to the
-`apt-get install` line in the `Dockerfile` — the wrapper notices the change by hash
-and rebuilds on your next `dev-sandbox`.
+Find `<slug>` with `docker ps`. For a permanent package, add it to the `apt-get
+install` line in the `Dockerfile` — the wrapper notices the change by hash and
+rebuilds on your next `dev-sandbox`.
 
 ### Use a different Node version
 
@@ -319,10 +305,10 @@ cd C:\Users\[user]\Documents\GitHub\docker-dev-sandbox
 .\dev-sandbox.ps1 -Rebuild -Command "node --version"
 ```
 
-To reset just one project, `dev-sandbox -Stop` then remove that project's volumes
+To reset one project, `dev-sandbox -Stop` then remove that project's volumes
 (`docker volume ls --filter name=dev-sandbox-` to find them: a home volume, plus one
-per `package.json` whose `node_modules` is shadowed). `-Isolated` volumes need no
-cleanup -- `-Stop` already removes them.
+per shadowed `node_modules`). `-Isolated` volumes need no cleanup — `-Stop` already
+removes them.
 
 ### Requirements
 
