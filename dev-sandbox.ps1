@@ -189,10 +189,26 @@ function Get-ModuleMounts($ProjectPath, $Slug, $IsIsolated) {
     return ,$mounts
 }
 
+function Test-PortNumber($Value) {
+    # The digit bound comes first on purpose: [int] throws on a long enough run
+    # of digits, so an unbounded '^\d+$' would blow up here rather than reaching
+    # the range check it was meant to feed.
+    if ($Value -notmatch '^\d{1,5}$') { return $false }
+    $n = [int]$Value
+    return ($n -ge 1 -and $n -le 65535)
+}
+
 function ConvertTo-PortMapping($Spec) {
-    if ($Spec -match '^\d+$') { return "$($Spec):$($Spec)" }
-    if ($Spec -match '^\d+:\d+$') { return $Spec }
-    Fail "invalid -Port value '$Spec'. Use 3000 or 8081:8080."
+    # Validated rather than merely shaped: an out-of-range port used to sail
+    # through to Test-HostPortFree, where the ArgumentOutOfRange it caused was
+    # swallowed by the catch and surfaced 20 tries later as "no free host port".
+    $parts = @($Spec -split ':')
+    if ($parts.Count -eq 1) { $parts = @($parts[0], $parts[0]) }
+    if ($parts.Count -ne 2 -or -not (Test-PortNumber $parts[0]) -or -not (Test-PortNumber $parts[1])) {
+        Fail "invalid -Port value '$Spec'. Use 3000 or 8081:8080, with each port in 1-65535."
+    }
+    # Cast back through [int] so 0080 and 80 cannot name the same port twice.
+    return "$([int]$parts[0]):$([int]$parts[1])"
 }
 
 function Get-DockerPublishedHostPorts {
@@ -236,6 +252,10 @@ function Resolve-PortMapping($Spec, $DockerPorts) {
     $maxTries = 20
     while (-not (Test-HostPortFree $hostPort $DockerPorts)) {
         $hostPort++
+        # Walking up from 65530 would otherwise leave the port range entirely.
+        if ($hostPort -gt 65535) {
+            Fail "no free host port found at or above $original before the end of the port range."
+        }
         if ($hostPort - $original -ge $maxTries) {
             Fail "no free host port found near $original after $maxTries tries."
         }
@@ -757,12 +777,23 @@ if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
 
 $execArgs = @("exec") + $ttyFlags + @("-w", "/workspace", $containerName)
 
+# Every way in is a login shell, so all three see the same environment. Plain
+# `bash` would not: an interactive shell reads ~/.bashrc and skips the profile
+# files, while `bash -lc` reads /etc/profile and ~/.profile and gets nothing
+# from ~/.bashrc, which returns early when it is not interactive. Anything put
+# in ~/.profile was therefore invisible to a shell and anything in ~/.bashrc
+# invisible to -Command. With -l, both read the profile, and ~/.bashrc still
+# applies to the interactive one -- which is what ~/.bashrc is for.
+#
+# Claude Code goes through the same shell for the same reason: its own bash
+# tool calls inherit this environment, so a PATH set up in ~/.profile has to
+# reach it too.
 if ($Command) {
     $execArgs += @("bash", "-lc", $Command)
 } elseif ($Claude) {
-    $execArgs += @("claude", "--dangerously-skip-permissions")
+    $execArgs += @("bash", "-lc", "claude --dangerously-skip-permissions")
 } else {
-    $execArgs += @("bash")
+    $execArgs += @("bash", "-l")
 }
 
 docker @execArgs
