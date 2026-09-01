@@ -103,7 +103,7 @@ options above are the way out of it.
 | `dev-sandbox -Port 8081:8080` | Remap when the host port is already taken |
 | `dev-sandbox -Path ..\other-repo` | Mount somewhere other than the current folder |
 | `dev-sandbox -Command "npm ci"` | Run one command instead of a shell |
-| `dev-sandbox -Isolated` | Throwaway home volume, for untrusted third-party code |
+| `dev-sandbox -Isolated` | Throwaway home + `node_modules` volumes, for untrusted third-party code |
 | `dev-sandbox -ClaudeAuth` | Log in once on Windows so no sandbox ever asks again |
 | `dev-sandbox -Persist` | Keep the container running after this shell exits |
 | `dev-sandbox -Stop` | Shut the container down |
@@ -211,7 +211,10 @@ an environment variable you already own.
 projects and are comfortable with that trade. It shares transcripts too, so it is the
 wrong tool for merely sharing a login.
 
-`-Isolated` goes the other way: a throwaway home volume that `-Stop` deletes.
+`-Isolated` goes the other way: throwaway home *and* `node_modules` volumes that
+`-Stop` deletes. They are separate from the ones an ordinary run of the same
+project uses, so nothing an untrusted `npm install` fetched is still mounted the
+next time you open a normal sandbox there.
 
 ### Git
 
@@ -315,8 +318,10 @@ cd C:\Users\[user]\Documents\GitHub\docker-dev-sandbox
 .\dev-sandbox.ps1 -Rebuild -Command "node --version"
 ```
 
-To reset just one project, `dev-sandbox -Stop` then remove that project's two
-volumes (`docker volume ls --filter name=dev-sandbox-` to find them).
+To reset just one project, `dev-sandbox -Stop` then remove that project's volumes
+(`docker volume ls --filter name=dev-sandbox-` to find them: a home volume, plus one
+per `package.json` whose `node_modules` is shadowed). `-Isolated` volumes need no
+cleanup -- `-Stop` already removes them.
 
 ### Requirements
 

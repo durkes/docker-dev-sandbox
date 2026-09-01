@@ -23,8 +23,9 @@
     Ports are fixed when the container is created -- use -Stop first to change them.
 
 .PARAMETER Isolated
-    Use a throwaway home volume, removed when the container is stopped. For
-    sandboxing untrusted third-party code.
+    Use throwaway home and node_modules volumes, removed when the container is
+    stopped, and separate from the ones a normal run uses. For sandboxing
+    untrusted third-party code.
 
 .PARAMETER SharedHome
     Share one home volume across all projects instead of a per-project one.
@@ -304,39 +305,45 @@ function Test-ContainerHasOtherShell($Name) {
     return $false
 }
 
-function Get-ContainerIsolatedHome($Name) {
-    # An -Isolated container carries the name of its throwaway home volume as a
-    # label. Reading it back off the container is the only way to be right about
-    # what to discard: $Isolated describes *this* invocation, not the one that
-    # created the container, so a plain "dev-sandbox -Stop" (or another window
-    # being the last one to exit) would otherwise leave the volume behind, and
-    # the next -Isolated run would silently mount it again.
-    # No 2>$null here, and no call to this unless the container exists: docker
-    # inspect writes to stderr for a missing one, which would be fatal.
-    $labelJson = docker inspect $Name --format '{{json .Config.Labels}}'
-    if ($LASTEXITCODE -ne 0) { return $null }
-    $labelJson = ($labelJson -join "")
-    if ([string]::IsNullOrWhiteSpace($labelJson)) { return $null }
-    $labels = $labelJson | ConvertFrom-Json
-    if (-not $labels) { return $null }
-    if ($labels.PSObject.Properties.Name -notcontains "dev-sandbox.isolated-home") { return $null }
-    return $labels."dev-sandbox.isolated-home"
-}
+function Remove-IsolatedVolumes($Slug) {
+    # Every volume an -Isolated run creates -- the home and each node_modules
+    # shadow, nested ones included -- is tagged with this project's slug when it
+    # is created, so the whole set can be found and discarded without knowing
+    # their names here.
+    #
+    # Labelling the volumes rather than the container is what makes this correct
+    # in the two cases that matter: $Isolated describes *this* invocation, not
+    # the one that created the container (so a plain "dev-sandbox -Stop", or
+    # another window being the last one to exit, still cleans up), and the tags
+    # outlive the container, so a crash or a reboot cannot strand a volume.
+    $names = docker volume ls -q --filter "label=dev-sandbox.isolated-project=$Slug"
+    foreach ($name in $names) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            docker volume rm $name | Out-Null
+        }
+    }
 
-function Remove-IsolatedHomeVolume($Name) {
-    if ($Name -and (Test-VolumeExists $Name)) {
-        docker volume rm $Name | Out-Null
+    # Belt and braces for a home volume created before those labels existed:
+    # this name only ever belongs to an -Isolated run.
+    $legacy = "dev-sandbox-home-isolated-$Slug"
+    if (Test-VolumeExists $legacy) {
+        docker volume rm $legacy | Out-Null
     }
 }
 
-function Remove-SandboxContainer($Name) {
-    $isolatedHome = $null
+function New-IsolatedVolume($Name, $Slug) {
+    # Created up front purely so it can carry the label; docker run would
+    # otherwise conjure it unlabelled and it could never be found again.
+    docker volume create --label "dev-sandbox.isolated-project=$Slug" $Name | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "failed to create volume $Name" }
+}
+
+function Remove-SandboxContainer($Name, $Slug) {
     if (Test-ContainerExists $Name) {
-        # Read the label before the container is removed along with it.
-        $isolatedHome = Get-ContainerIsolatedHome $Name
         docker rm -f $Name | Out-Null
     }
-    Remove-IsolatedHomeVolume $isolatedHome
+    # After the container is gone: a volume still mounted cannot be removed.
+    Remove-IsolatedVolumes $Slug
 }
 
 # --------------------------------------------------------------------------
@@ -382,7 +389,13 @@ if ($projectParent -and ($projectParent.TrimEnd('\') -ieq $usersRoot.TrimEnd('\'
 $slug          = Get-Slug $projectPath
 $image         = "dev-sandbox:node$NodeVersion"
 $containerName = "dev-sandbox-$slug"
-$modulesVolume = "dev-sandbox-modules-$slug"
+
+# An -Isolated run gets its own namespace for the node_modules shadows, not just
+# for the home. Sharing them would hand whatever an untrusted `npm install`
+# fetched straight to the next ordinary run of this project -- and would make the
+# volumes unsafe to delete on -Stop, since they would be holding the real
+# per-project node_modules too.
+$modulesPrefix = if ($Isolated) { "dev-sandbox-modules-isolated-" } else { "dev-sandbox-modules-" }
 
 # Shadow node_modules for the root package.json plus every nested workspace
 # (e.g. v1/package.json) so a Linux npm install never lands on the real
@@ -394,7 +407,7 @@ $moduleMounts = @()
 if (-not $SharedModules) {
     $moduleMounts += [pscustomobject]@{
         ContainerPath = "/workspace/node_modules"
-        Volume        = $modulesVolume
+        Volume        = "$modulesPrefix$slug"
     }
 
     # 4 levels deep covers every realistic monorepo layout (e.g.
@@ -406,18 +419,14 @@ if (-not $SharedModules) {
         $nestedSlug = Get-Slug $dir
         $moduleMounts += [pscustomobject]@{
             ContainerPath = "/workspace/$relPath/node_modules"
-            Volume        = "dev-sandbox-modules-$nestedSlug"
+            Volume        = "$modulesPrefix$nestedSlug"
         }
     }
 }
 
-# Named unconditionally so -Stop can discard a leftover one without the caller
-# having to repeat -Isolated.
-$isolatedHomeVolume = "dev-sandbox-home-isolated-$slug"
-
 if ($Isolated) {
-    $homeVolume = $isolatedHomeVolume
-    $homeLabel  = "isolated, discarded on -Stop"
+    $homeVolume = "dev-sandbox-home-isolated-$slug"
+    $homeLabel  = "isolated, discarded with node_modules on -Stop"
 } elseif ($SharedHome) {
     $homeVolume = "dev-sandbox-home-shared"
     $homeLabel  = "shared across all projects"
@@ -432,10 +441,7 @@ if ($Isolated) {
 
 if ($Stop) {
     $existed = Test-ContainerExists $containerName
-    Remove-SandboxContainer $containerName
-    # Also sweep a leftover from a crashed or rebooted session. This name only
-    # ever belongs to an -Isolated home, so removing it on any -Stop is safe.
-    Remove-IsolatedHomeVolume $isolatedHomeVolume
+    Remove-SandboxContainer $containerName $slug
     if ($existed) {
         Write-Host "dev-sandbox: stopped $containerName" -ForegroundColor Yellow
     } else {
@@ -556,9 +562,13 @@ if (-not (Test-ContainerRunning $containerName)) {
         docker rm -f $containerName | Out-Null
     }
 
-    # "Throwaway" has to mean it: a volume surviving a crash or a reboot would
+    # "Throwaway" has to mean it: volumes surviving a crash or a reboot would
     # otherwise be mounted straight back into the new sandbox.
-    if ($Isolated) { Remove-IsolatedHomeVolume $isolatedHomeVolume }
+    if ($Isolated) {
+        Remove-IsolatedVolumes $slug
+        New-IsolatedVolume $homeVolume $slug
+        foreach ($mount in $moduleMounts) { New-IsolatedVolume $mount.Volume $slug }
+    }
 
     $runArgs = @(
         "run", "-d",
@@ -572,12 +582,6 @@ if (-not (Test-ContainerRunning $containerName)) {
         "-v", "$($projectPath):/workspace",
         "-v", "$($homeVolume):/home/node"
     )
-
-    # Recorded on the container so -Stop, and the auto-stop when the last shell
-    # exits, can find this volume again without -Isolated being repeated.
-    if ($Isolated) {
-        $runArgs += @("--label", "dev-sandbox.isolated-home=$homeVolume")
-    }
 
     # Shadow the host's node_modules: a Windows npm install produces Windows
     # binaries and .cmd shims that break under Linux, and vice versa. Covers
@@ -734,7 +738,7 @@ $exitCode = $LASTEXITCODE
 
 if (-not $Persist) {
     if (-not (Test-ContainerHasOtherShell $containerName)) {
-        Remove-SandboxContainer $containerName
+        Remove-SandboxContainer $containerName $slug
         Write-Host "dev-sandbox: last shell exited, stopped $containerName" -ForegroundColor Yellow
     }
 }
