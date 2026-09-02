@@ -28,8 +28,7 @@ RUN npm install -g @anthropic-ai/claude-code \
 
 # A Windows bind mount's ownership will not match the container user; tell git
 # not to treat that as dubious ownership.
-RUN git config --system --add safe.directory /workspace \
- && git config --system --add safe.directory '*'
+RUN git config --system --add safe.directory '*'
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false \
