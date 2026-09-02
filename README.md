@@ -98,7 +98,7 @@ the way out of it.
 | Command | What it does |
 | --- | --- |
 | `dev-sandbox` | Mount the current directory, open a shell |
-| `dev-sandbox -Claude` | Same, but launch Claude Code with `--dangerously-skip-permissions` |
+| `dev-sandbox -Claude` | Same, but update Claude Code to the latest npm release and launch it with `--dangerously-skip-permissions` |
 | `dev-sandbox -Port 5173` | Publish a different port |
 | `dev-sandbox -Port 3000,5173,8080` | Publish several |
 | `dev-sandbox -Port 8081:8080` | Remap when the host port is already taken |
@@ -109,8 +109,13 @@ the way out of it.
 | `dev-sandbox -Persist` | Keep the container running after this shell exits |
 | `dev-sandbox -Stop` | Shut the container down |
 
-Default published ports are **3000, 5173, 8080** (Next/CRA, Vite, and a spare).
-Publishing an unused port costs nothing, so you rarely need `-Port` at all.
+Default published ports are **3000, 5173, 8080, 8788, 8789** (Next/CRA, Vite, a
+spare, and the Wrangler/Cloudflare Pages dev pair). Publishing an unused port costs
+nothing, so you rarely need `-Port` at all.
+
+`-Claude` runs `npm install -g @anthropic-ai/claude-code` before launching, so it's
+always on the latest release regardless of how stale the image is — the image's own
+copy is just the offline fallback if npm can't be reached.
 
 ### Multiple prompts in the same sandbox
 

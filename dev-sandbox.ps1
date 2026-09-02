@@ -16,6 +16,8 @@
 
 .PARAMETER Port
     Host ports to publish. Accepts bare ports (3000) or remaps (8081:8080).
+    Defaults to 3000, 5173, 8080, 8788, 8789 (Next/CRA, Vite, a spare, and the
+    Wrangler/Cloudflare Pages dev pair).
     If a host port is already taken, it walks upward to the next free one.
     Ports are fixed when the container is created -- use -Stop first to change them.
 
@@ -35,6 +37,7 @@
 
 .PARAMETER Claude
     Launch Claude Code (--dangerously-skip-permissions) instead of a shell.
+    Updates Claude Code to the latest npm release first.
 
 .PARAMETER Command
     Run this command instead of an interactive shell.
@@ -74,7 +77,7 @@
 [CmdletBinding()]
 param(
     [string]   $Path = ".",
-    [string[]] $Port = @("3000", "5173", "8080"),
+    [string[]] $Port = @("3000", "5173", "8080", "8788", "8789"),
     [switch]   $Isolated,
     [switch]   $SharedHome,
     [switch]   $SharedModules,
@@ -729,6 +732,19 @@ if ($Persist) {
     Write-Host "  stops automatically once no other shell is attached (-Persist to keep it running)." -ForegroundColor DarkGray
 }
 Write-Host ""
+
+# The image can lag behind npm by however long it's been since the last
+# -Rebuild, and Docker's layer cache would keep serving that stale install even
+# across a rebuild whose Dockerfile line didn't change. So refresh it here
+# instead, right before it's actually used, rather than trying to keep the
+# image itself current.
+if ($Claude) {
+    Write-Host "dev-sandbox: updating Claude Code..." -ForegroundColor DarkGray
+    docker exec -u root $containerName npm install -g @anthropic-ai/claude-code --no-fund --no-audit --silent | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "dev-sandbox: could not update Claude Code (offline?) -- continuing with the installed version." -ForegroundColor Yellow
+    }
+}
 
 # Allocate a TTY only when there is one: -t with redirected stdin fails outright.
 if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
