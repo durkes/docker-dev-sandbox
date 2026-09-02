@@ -73,6 +73,9 @@ afterwards.
 [Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")
 ```
 
+Open a new PowerShell window afterwards — like `-ClaudeAuth`, this only takes effect
+in new processes.
+
 Either way the wrapper forwards the value into the container as an environment
 variable at creation time. It is **never written to disk**, so there is nothing to
 accidentally commit and Claude Code works immediately in every project with no
