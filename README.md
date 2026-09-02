@@ -1,7 +1,7 @@
 # docker-dev-sandbox
 
-A reusable Docker sandbox for Node projects on Windows, so you can let AI agents
-run wild inside a project without giving them access to your whole machine.
+A reusable Docker sandbox for Node projects on Windows, so you can let Claude Code
+run wild without giving it access to your whole machine.
 
 The image holds **no project code**. Your project is bind-mounted in at run time, so
 one image serves every repo. From any project folder:
