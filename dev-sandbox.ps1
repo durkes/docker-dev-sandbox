@@ -223,8 +223,24 @@ function Get-DockerPublishedHostPorts {
     return ,$ports
 }
 
-function Test-HostPortFree([int]$HostPort, $DockerPorts) {
-    if ($DockerPorts.Contains($HostPort)) { return $false }
+function Get-ListeningHostPorts {
+    # A TcpListener probe alone is not enough: a socket opened with SO_REUSEADDR
+    # (libuv's default, so every plain `node server.js`) lets a second bind on the
+    # same port succeed, so the probe reports "free" for a port a dev server is
+    # already serving -- and Docker, which binds exclusively, then fails with
+    # "Only one usage of each socket address ... is normally permitted". Read the
+    # listener table instead, which is exactly what Docker will collide with.
+    $ports = New-Object System.Collections.Generic.HashSet[int]
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    foreach ($endpoint in $listeners) { [void]$ports.Add([int]$endpoint.Port) }
+    # Comma operator: see Get-DockerPublishedHostPorts.
+    return ,$ports
+}
+
+function Test-HostPortFree([int]$HostPort, $TakenPorts) {
+    if ($TakenPorts.Contains($HostPort)) { return $false }
+    # Still probe: this catches what the tables cannot show, such as a Hyper-V
+    # reserved port range with nothing listening in it.
     try {
         $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $HostPort)
         $listener.Start()
@@ -235,7 +251,7 @@ function Test-HostPortFree([int]$HostPort, $DockerPorts) {
     }
 }
 
-function Resolve-PortMapping($Spec, $DockerPorts) {
+function Resolve-PortMapping($Spec, $TakenPorts) {
     # Ports are fixed at container creation, so a conflict only needs dodging
     # once: walk upward until a free host port is found.
     $mapping = ConvertTo-PortMapping $Spec
@@ -244,7 +260,7 @@ function Resolve-PortMapping($Spec, $DockerPorts) {
     $original = $hostPort
 
     $maxTries = 20
-    while (-not (Test-HostPortFree $hostPort $DockerPorts)) {
+    while (-not (Test-HostPortFree $hostPort $TakenPorts)) {
         $hostPort++
         if ($hostPort -gt 65535) {
             Fail "no free host port found at or above $original before the end of the port range."
@@ -613,15 +629,18 @@ if (-not (Test-ContainerRunning $containerName)) {
         $runArgs += @("-v", "$($mount.Volume):$($mount.ContainerPath)")
     }
 
-    $dockerPorts = Get-DockerPublishedHostPorts
+    # Ports already spoken for: Docker's own published mappings plus everything
+    # listening on the host. Gathered once -- neither changes mid-loop.
+    $takenPorts = Get-DockerPublishedHostPorts
+    foreach ($listening in (Get-ListeningHostPorts)) { [void]$takenPorts.Add($listening) }
     $resolvedPorts = @()
     foreach ($p in $Port) {
-        $resolvedMapping = Resolve-PortMapping $p $dockerPorts
+        $resolvedMapping = Resolve-PortMapping $p $takenPorts
         $resolvedPorts += $resolvedMapping
         # Reserve it immediately, or two entries in the same -Port list could
         # both resolve to the same free port before either is published.
         $chosenHostPort = [int](($resolvedMapping -split ':')[0])
-        [void]$dockerPorts.Add($chosenHostPort)
+        [void]$takenPorts.Add($chosenHostPort)
         $runArgs += @("-p", $resolvedMapping)
     }
 
