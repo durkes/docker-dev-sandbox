@@ -206,10 +206,15 @@ function Get-DockerPublishedHostPorts {
     # Docker Desktop's WSL2 backend publishes container ports without binding a
     # plain Windows socket, so a TcpListener probe cannot see another
     # container's published port and `docker run -p` then fails with "port is
-    # already allocated". Ask Docker separately.
+    # already allocated". Ask Docker separately -- via inspect, since `docker ps`
+    # collapses contiguous mappings into ranges ("0.0.0.0:8788-8789->8788-8789/tcp")
+    # that a per-port scrape cannot see.
     $ports = New-Object System.Collections.Generic.HashSet[int]
-    docker ps --format '{{.Ports}}' | ForEach-Object {
-        foreach ($m in [regex]::Matches($_, ':(\d+)->')) {
+    $ids = @(docker ps -q)
+    # `docker inspect` with no arguments is an error.
+    if ($ids.Count -eq 0) { return ,$ports }
+    docker inspect --format '{{json .NetworkSettings.Ports}}' @ids | ForEach-Object {
+        foreach ($m in [regex]::Matches($_, '"HostPort":"(\d+)"')) {
             [void]$ports.Add([int]$m.Groups[1].Value)
         }
     }
@@ -647,7 +652,12 @@ if (-not (Test-ContainerRunning $containerName)) {
     $runArgs += @($image, "tail", "-f", "/dev/null")
 
     docker @runArgs | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "failed to start container" }
+    if ($LASTEXITCODE -ne 0) {
+        # A run that fails partway -- a port collision programming the network,
+        # say -- still leaves the created container behind.
+        docker rm -f $containerName | Out-Null
+        Fail "failed to start container"
+    }
     $created = $true
 
     foreach ($mount in $moduleMounts) {
